@@ -203,6 +203,9 @@ h1, h2, h3, p { margin: 0; }
   border: 3px solid var(--ink); border-radius: 999px; background: #fff; padding: 4px 14px; font-size: 1.05rem; cursor: pointer; box-shadow: 0 2px 0 var(--ink); transition: transform .1s;
 }
 .chip:hover { transform: translateY(-2px) rotate(-2deg); background: #fff7d6; }
+.chip.freq { background: #fff1b8; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; animation: pop-in .3s cubic-bezier(.2, 1.4, .3, 1) both; }
+.chip.freq:hover { background: var(--yellow); }
+.chips[hidden] { display: none; }
 .hw-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
 .hw-item {
   display: flex; align-items: center; gap: 12px; background: #fff; border: var(--line); border-radius: 22px; padding: 12px 14px; box-shadow: var(--shadow-s);

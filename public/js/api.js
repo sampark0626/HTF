@@ -63,6 +63,7 @@ export const api = {
   startHtf: (durationSec) => request('POST', '/htf/start', { durationSec }),
   endHtf: () => request('POST', '/htf/end', {}),
   addHomework: (title) => request('POST', '/homework', { title }),
+  frequent: () => request('GET', '/homework/frequent'),
   deleteHomework: (id) => request('DELETE', `/homework/${id}`),
   clear: (id, image) => request('POST', `/homework/${id}/clear`, { image }),
   reanalyze: (id) => request('POST', `/homework/${id}/reanalyze`, {}),

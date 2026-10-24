@@ -290,6 +290,20 @@ async function main() {
     return h;
   }
 
+  // 자주 하는 숙제: 같은 이름(공백·대소문자 무시)으로 2번 이상 적은 숙제를 많이 적은 순 → 최근 순으로
+  api.get('/homework/frequent', async (req, res) => {
+    const rows = await db.query(
+      `SELECT (array_agg(title ORDER BY created_at DESC))[1] AS title, COUNT(*) AS n, MAX(created_at) AS last_at
+       FROM homework WHERE user_id = $1
+       GROUP BY lower(regexp_replace(btrim(title), '\\s+', ' ', 'g'))
+       HAVING COUNT(*) >= 2
+       ORDER BY n DESC, last_at DESC
+       LIMIT 8`,
+      [req.user.id]
+    );
+    res.json({ items: rows.map((r) => ({ title: r.title, count: Number(r.n) })) });
+  });
+
   api.post('/homework', async (req, res) => {
     const title = str(req.body.title, 60);
     if (!title) throw new HttpError(400, '숙제 이름을 적어 주세요');

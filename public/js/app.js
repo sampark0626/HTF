@@ -450,6 +450,7 @@ function screenHomework() {
         <input id="title" maxlength="60" placeholder="예) 수학 문제집 2쪽" enterkeyhint="done" aria-label="숙제 이름">
         <button class="btn btn-blue" type="submit">➕ 추가</button>
       </form>
+      <div class="chips" id="freq" hidden></div>
       <div class="chips"><small>빠른 입력</small>${QUICK.map((c) => `<button type="button" class="chip" data-chip="${c}">${c}</button>`).join('')}</div>
       <ul class="hw-list" id="list"></ul>
       <div class="hw-cta"><button class="btn btn-mint big" id="done">✅ 다 적었어요!</button></div>
@@ -457,6 +458,20 @@ function screenHomework() {
   const list = $('#list', el);
   const input = $('#title', el);
   const doneBtn = $('#done', el);
+  const freqBox = $('#freq', el);
+
+  // 자주 하는 숙제: 지난번들에서 같은 이름으로 2번 이상 적은 숙제를 한 번에 넣는 단축 버튼
+  const norm = (s) => s.trim().replace(/\s+/g, ' ').toLowerCase();
+  let frequent = [];
+  function renderFreq() {
+    const have = new Set(pending().map((i) => norm(i.title)));
+    const shown = frequent.filter((f) => !have.has(norm(f.title)));
+    freqBox.hidden = !shown.length;
+    freqBox.innerHTML = shown.length
+      ? `<small>⭐ 자주 하는 숙제</small>${shown.map((f) => `<button type="button" class="chip freq" data-quick="${esc(f.title)}" title="누르면 바로 들어가요">＋ ${esc(f.title)}</button>`).join('')}`
+      : '';
+  }
+  api.frequent().then((r) => { frequent = r.items; renderFreq(); }).catch(() => { /* 단축 버튼은 없어도 된다 */ });
 
   function renderList(newId) {
     const items = pending();
@@ -472,25 +487,41 @@ function screenHomework() {
   }
   renderList();
 
-  $('#add', el).onsubmit = async (e) => {
-    e.preventDefault();
-    const title = input.value.trim();
-    if (!title) { shake(input); sfx.error(); input.focus(); return; }
+  let adding = false;
+  async function addTitle(title) {
+    if (adding) return false;
+    adding = true;
     sfx.unlock();
     try {
       const { item } = await api.addHomework(title);
       state.items.push(item);
-      input.value = '';
       renderList(item.id);
+      renderFreq();
       sfx.pop();
+      return true;
     } catch (err) {
       toast(err.message, 'err');
       sfx.error();
+      return false;
+    } finally {
+      adding = false;
     }
+  }
+
+  $('#add', el).onsubmit = async (e) => {
+    e.preventDefault();
+    const title = input.value.trim();
+    if (!title) { shake(input); sfx.error(); input.focus(); return; }
+    if (await addTitle(title)) input.value = '';
     input.focus();
   };
 
   el.addEventListener('click', async (e) => {
+    const quick = e.target.closest('[data-quick]');
+    if (quick) {
+      addTitle(quick.dataset.quick);
+      return;
+    }
     const chip = e.target.closest('[data-chip]');
     if (chip) {
       sfx.tap();
@@ -508,6 +539,7 @@ function screenHomework() {
         await sleep(280);
         state.items = state.items.filter((i) => i.id !== del.dataset.del);
         renderList();
+        renderFreq();
       } catch (err) {
         li.classList.remove('out');
         toast(err.message, 'err');

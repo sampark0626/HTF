@@ -2,8 +2,11 @@
 // Gemini 멀티모달로 "숙제 결과물 사진"을 판독한다.
 // generateContent 에 이미지(inline_data)를 보내고 JSON 한 덩어리를 돌려받는다.
 
-const DEFAULT_MODEL = 'gemini-3.8-flash';
-const DEFAULT_FALLBACKS = 'gemini-3.5-flash-lite,gemini-2.5-flash';
+// 저렴한 Flash-Lite 계열 (요금 문서 기준 모두 무료 등급이 있다)
+const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
+const DEFAULT_FALLBACKS = 'gemini-3.1-flash-lite,gemini-2.5-flash-lite';
+// 키 오류(401)·결제 문제(402)는 모델을 바꿔도 소용없으니 바로 멈춘다
+const ACCOUNT_ERRORS = [401, 402];
 const PER_CALL_TIMEOUT_MS = 30000;
 const TOTAL_BUDGET_MS = 60000;
 
@@ -113,8 +116,10 @@ async function callModel(model, prompt, imageBuf, mime) {
     signal: AbortSignal.timeout(PER_CALL_TIMEOUT_MS),
   });
   if (!res.ok) {
-    const detail = (await res.text().catch(() => '')).slice(0, 300);
-    throw new Error(`Gemini ${model} HTTP ${res.status} ${detail}`);
+    const detail = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 300);
+    const err = new Error(`Gemini ${model} HTTP ${res.status} ${detail}`);
+    err.status = res.status;
+    throw err;
   }
   const data = await res.json();
   const parts = data.candidates?.[0]?.content?.parts || [];
@@ -142,6 +147,7 @@ async function analyze({ profile, title, imageBuf, mime }) {
     } catch (err) {
       lastErr = err;
       console.warn('[ai]', err.message);
+      if (ACCOUNT_ERRORS.includes(err.status)) break;
     }
   }
   throw lastErr || new Error('AI 분석 실패');
