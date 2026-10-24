@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS homework (
   ai_status TEXT NOT NULL DEFAULT 'none',
   ai_model TEXT
 );
+ALTER TABLE homework ADD COLUMN IF NOT EXISTS added_by TEXT;
 CREATE INDEX IF NOT EXISTS homework_user_idx ON homework(user_id, status);
 CREATE TABLE IF NOT EXISTS photos (
   id TEXT PRIMARY KEY,

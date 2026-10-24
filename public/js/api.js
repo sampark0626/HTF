@@ -73,6 +73,10 @@ export const api = {
   adminLogout: () => { adminToken = null; },
   adminKids: () => request('GET', '/admin/kids', undefined, true),
   adminAction: (name, action) => request('POST', `/admin/kids/${encodeURIComponent(name)}/${action}`, {}, true),
+  adminHomework: (name) => request('GET', `/admin/kids/${encodeURIComponent(name)}/homework`, undefined, true),
+  adminAddHomework: (name, title) => request('POST', `/admin/kids/${encodeURIComponent(name)}/homework`, { title }, true),
+  adminEditHomework: (name, id, title) => request('PATCH', `/admin/kids/${encodeURIComponent(name)}/homework/${id}`, { title }, true),
+  adminDeleteHomework: (name, id) => request('DELETE', `/admin/kids/${encodeURIComponent(name)}/homework/${id}`, undefined, true),
 };
 
 // 사진은 로그인 토큰이 있어야 볼 수 있어서, 헤더를 붙여 받아온 뒤 blob URL 로 보여 준다.

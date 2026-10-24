@@ -57,6 +57,7 @@ const publicItem = (h) => ({
   aiComment: h.ai_comment,
   aiNote: h.ai_note,
   aiStatus: h.ai_status,
+  byParent: h.added_by === 'parent',
 });
 
 const publicSession = (s) => (s ? {
@@ -284,14 +285,49 @@ async function main() {
   });
 
   // ───────── 숙제 ─────────
-  async function ownedItem(req) {
-    const [h] = await db.query('SELECT * FROM homework WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
+  async function findOwned(userId, id) {
+    const [h] = await db.query('SELECT * FROM homework WHERE id = $1 AND user_id = $2', [id, userId]);
     if (!h) throw new HttpError(404, '숙제를 찾을 수 없어요');
     return h;
   }
+  const ownedItem = (req) => findOwned(req.user.id, req.params.id);
+
+  // 숙제 추가·수정·삭제는 아이 화면과 부모님 메뉴가 같은 규칙을 쓴다
+  function cleanTitle(value) {
+    const title = str(value, 60);
+    if (!title) throw new HttpError(400, '숙제 이름을 적어 주세요');
+    return title;
+  }
+
+  async function createHomework(userId, rawTitle, addedBy = null) {
+    const title = cleanTitle(rawTitle);
+    const [c] = await db.query("SELECT COUNT(*) AS n FROM homework WHERE user_id = $1 AND status = 'pending'", [userId]);
+    if (Number(c.n) >= MAX_PENDING) throw new HttpError(400, `숙제는 ${MAX_PENDING}개까지만 적을 수 있어요`);
+    const id = uid();
+    await db.query(
+      'INSERT INTO homework (id, user_id, title, created_at, added_by) VALUES ($1, $2, $3, $4, $5)',
+      [id, userId, title, Date.now(), addedBy]
+    );
+    const [h] = await db.query('SELECT * FROM homework WHERE id = $1', [id]);
+    return h;
+  }
+
+  async function renameHomework(userId, id, rawTitle) {
+    const h = await findOwned(userId, id);
+    if (h.status !== 'pending') throw new HttpError(400, '이미 끝낸 숙제는 바꿀 수 없어요');
+    const title = cleanTitle(rawTitle);
+    await db.query('UPDATE homework SET title = $1 WHERE id = $2', [title, h.id]);
+    return { ...h, title };
+  }
+
+  async function removeHomework(userId, id) {
+    const h = await findOwned(userId, id);
+    if (h.status !== 'pending') throw new HttpError(400, '이미 끝낸 숙제는 지울 수 없어요');
+    await db.query('DELETE FROM homework WHERE id = $1', [h.id]);
+  }
 
   // 자주 하는 숙제: 같은 이름(공백·대소문자 무시)으로 2번 이상 적은 숙제를 많이 적은 순 → 최근 순으로
-  api.get('/homework/frequent', async (req, res) => {
+  async function frequentTitles(userId) {
     const rows = await db.query(
       `SELECT (array_agg(title ORDER BY created_at DESC))[1] AS title, COUNT(*) AS n, MAX(created_at) AS last_at
        FROM homework WHERE user_id = $1
@@ -299,38 +335,25 @@ async function main() {
        HAVING COUNT(*) >= 2
        ORDER BY n DESC, last_at DESC
        LIMIT 8`,
-      [req.user.id]
+      [userId]
     );
-    res.json({ items: rows.map((r) => ({ title: r.title, count: Number(r.n) })) });
+    return rows.map((r) => ({ title: r.title, count: Number(r.n) }));
+  }
+
+  api.get('/homework/frequent', async (req, res) => {
+    res.json({ items: await frequentTitles(req.user.id) });
   });
 
   api.post('/homework', async (req, res) => {
-    const title = str(req.body.title, 60);
-    if (!title) throw new HttpError(400, '숙제 이름을 적어 주세요');
-    const [c] = await db.query("SELECT COUNT(*) AS n FROM homework WHERE user_id = $1 AND status = 'pending'", [req.user.id]);
-    if (Number(c.n) >= MAX_PENDING) throw new HttpError(400, `숙제는 ${MAX_PENDING}개까지만 적을 수 있어요`);
-    const id = uid();
-    await db.query(
-      'INSERT INTO homework (id, user_id, title, created_at) VALUES ($1, $2, $3, $4)',
-      [id, req.user.id, title, Date.now()]
-    );
-    const [h] = await db.query('SELECT * FROM homework WHERE id = $1', [id]);
-    res.json({ item: publicItem(h) });
+    res.json({ item: publicItem(await createHomework(req.user.id, req.body.title)) });
   });
 
   api.patch('/homework/:id', async (req, res) => {
-    const h = await ownedItem(req);
-    if (h.status !== 'pending') throw new HttpError(400, '이미 끝낸 숙제는 바꿀 수 없어요');
-    const title = str(req.body.title, 60);
-    if (!title) throw new HttpError(400, '숙제 이름을 적어 주세요');
-    await db.query('UPDATE homework SET title = $1 WHERE id = $2', [title, h.id]);
-    res.json({ item: publicItem({ ...h, title }) });
+    res.json({ item: publicItem(await renameHomework(req.user.id, req.params.id, req.body.title)) });
   });
 
   api.delete('/homework/:id', async (req, res) => {
-    const h = await ownedItem(req);
-    if (h.status !== 'pending') throw new HttpError(400, '이미 끝낸 숙제는 지울 수 없어요');
-    await db.query('DELETE FROM homework WHERE id = $1', [h.id]);
+    await removeHomework(req.user.id, req.params.id);
     res.json({ ok: true });
   });
 
@@ -506,6 +529,40 @@ async function main() {
     const u = await kidFromParam(req);
     await db.query("UPDATE users SET pin_hash = '', updated_at = $1 WHERE id = $2", [Date.now(), u.id]);
     auth.clearFails(u.name);
+    res.json({ ok: true });
+  });
+
+  // ── 부모님이 아이의 숙제를 확인하고 고친다 (빼먹은 숙제 넣어 주기) ──
+  // 대기 중인 숙제는 추가·수정·삭제, 클리어한 숙제는 최근 30개를 읽기만 한다.
+  admin.get('/kids/:name/homework', async (req, res) => {
+    const u = await kidFromParam(req);
+    const pending = await db.query(
+      "SELECT * FROM homework WHERE user_id = $1 AND status = 'pending' ORDER BY created_at ASC", [u.id]
+    );
+    const done = await db.query(
+      "SELECT * FROM homework WHERE user_id = $1 AND status = 'done' ORDER BY done_at DESC LIMIT 30", [u.id]
+    );
+    res.json({
+      kid: { name: u.name, avatar: avatars.parseAvatar(u.avatar, kidIndex(u.name)) },
+      pending: pending.map(publicItem),
+      done: done.map(publicItem),
+      frequent: await frequentTitles(u.id),
+    });
+  });
+
+  admin.post('/kids/:name/homework', async (req, res) => {
+    const u = await kidFromParam(req);
+    res.json({ item: publicItem(await createHomework(u.id, req.body.title, 'parent')) });
+  });
+
+  admin.patch('/kids/:name/homework/:id', async (req, res) => {
+    const u = await kidFromParam(req);
+    res.json({ item: publicItem(await renameHomework(u.id, req.params.id, req.body.title)) });
+  });
+
+  admin.delete('/kids/:name/homework/:id', async (req, res) => {
+    const u = await kidFromParam(req);
+    await removeHomework(u.id, req.params.id);
     res.json({ ok: true });
   });
 

@@ -435,6 +435,7 @@ function screenSetup(name) {
 
 // ───────────────────────── 3. 오늘의 Homework ─────────────────────────
 const carryLabel = (n) => (n >= 2 ? `🔁 ${n}번째 이어하기` : '🔁 지난번에 못 끝냈어요');
+const parentBadge = (it) => (it.byParent ? '<span class="carry by-parent">👪 부모님이 넣어 줬어요</span>' : '');
 
 function screenHomework() {
   setTopbar('full');
@@ -479,7 +480,7 @@ function screenHomework() {
       ? items.map((it, i) => `
           <li class="hw-item ${it.id === newId ? 'new' : ''}" data-id="${it.id}" style="--d:${newId ? 0 : i * 0.05}s">
             <span class="hw-no">${i + 1}</span>
-            <span class="hw-title">${esc(it.title)}${it.carryCount > 0 ? `<span class="carry">${carryLabel(it.carryCount)}</span>` : ''}</span>
+            <span class="hw-title">${esc(it.title)}${it.carryCount > 0 ? `<span class="carry">${carryLabel(it.carryCount)}</span>` : ''}${parentBadge(it)}</span>
             <button class="icon-btn" data-del="${it.id}" aria-label="지우기">🗑️</button>
           </li>`).join('')
       : '<li class="card empty"><span class="big-emoji">📝</span>아직 숙제가 없어요.<br>오늘 할 숙제를 적어 볼까요?</li>';
@@ -739,7 +740,7 @@ function screenRun() {
   const todoCard = (it, i, animate) => `
     <li class="task ${animate ? 'enter' : ''}" data-id="${it.id}" style="--d:${i * 0.08}s">
       <span class="no">${i + 1}</span>
-      <div class="t-body"><div class="t-title">${esc(it.title)}</div>${it.carryCount > 0 ? `<span class="carry">${carryLabel(it.carryCount)}</span>` : ''}</div>
+      <div class="t-body"><div class="t-title">${esc(it.title)}</div>${it.carryCount > 0 ? `<span class="carry">${carryLabel(it.carryCount)}</span>` : ''}${parentBadge(it)}</div>
       <button class="btn btn-mint clear-btn" data-clear="${it.id}" style="--d:${i * 0.4}s">클리어! ✨</button>
     </li>`;
   const doneCard = (it, justId) => {
@@ -1213,6 +1214,7 @@ async function screenParent() {
       </div>
       ${k.registered ? `
         <div class="pc-actions">
+          <button class="btn btn-blue small" data-act="homework">📝 숙제 보기·편집</button>
           <button class="btn btn-white small" data-act="clear-records">🧹 기록만 지우기</button>
           <button class="btn btn-white small" data-act="reset-pin">🔑 비밀번호 다시 정하기</button>
           <button class="btn btn-coral small" data-act="reset-all">🔄 처음부터 다시</button>
@@ -1231,6 +1233,7 @@ async function screenParent() {
     if (!btn) return;
     sfx.tap();
     const name = btn.closest('.parent-card').dataset.name;
+    if (btn.dataset.act === 'homework') { screenParentHomework(name); return; }
     const a = PARENT_ACTIONS[btn.dataset.act];
     if (!(await confirmDialog({ title: `${name}: ${a.title}`, text: a.text, yes: '네, 할게요', no: '아니요' }))) return;
     btn.disabled = true;
@@ -1244,6 +1247,182 @@ async function screenParent() {
       btn.disabled = false;
       toast(err.message, 'err');
       sfx.error();
+    }
+  });
+}
+
+// 부모님이 한 아이의 숙제를 보고 고친다: 빼먹은 숙제 넣기, 이름 고치기, 지우기
+async function screenParentHomework(name) {
+  setTopbar('none');
+  let data;
+  try {
+    data = await api.adminHomework(name);
+  } catch (err) {
+    toast(err.message, 'err');
+    if (err.status === 401) screenParentLogin(); else screenParent();
+    return;
+  }
+  let { pending, frequent } = data;
+  let editingId = null;
+  const norm = (s) => s.trim().replace(/\s+/g, ' ').toLowerCase();
+
+  const el = mount(`
+    <div class="my">
+      <button class="back-link" id="back">← 부모님 메뉴</button>
+      <div class="pc-head">
+        ${avatarHtml(data.kid.avatar, { size: 'lg' })}
+        <div><h2 style="font-size:1.8rem">${esc(name)}의 숙제 📝</h2>
+          <p>빼먹은 숙제를 넣어 주거나, 잘못 적은 숙제를 고칠 수 있어요.</p></div>
+      </div>
+      <form class="add-row" id="add" autocomplete="off">
+        <input id="title" maxlength="60" placeholder="추가할 숙제 이름" aria-label="추가할 숙제 이름">
+        <button class="btn btn-blue" type="submit">➕ 추가</button>
+      </form>
+      <div class="chips" id="freq" hidden></div>
+      <div class="rec-day">⏳ 아직 안 한 숙제 (아이 화면에 그대로 보여요)</div>
+      <ul class="hw-list" id="list"></ul>
+      <div class="rec-day">✔ 클리어한 숙제 (최근 30개 · 보기만 가능)</div>
+      <div id="done" style="display:grid;gap:10px"></div>
+    </div>`);
+  const list = $('#list', el);
+  const input = $('#title', el);
+  const freqBox = $('#freq', el);
+
+  const fail = (err) => {
+    toast(err.message, 'err');
+    sfx.error();
+    if (err.status === 401) screenParentLogin();
+  };
+
+  function renderFreq() {
+    const have = new Set(pending.map((i) => norm(i.title)));
+    const shown = frequent.filter((f) => !have.has(norm(f.title)));
+    freqBox.hidden = !shown.length;
+    freqBox.innerHTML = shown.length
+      ? `<small>⭐ ${esc(name)}가 자주 하는 숙제</small>${shown.map((f) => `<button type="button" class="chip freq" data-quick="${esc(f.title)}">＋ ${esc(f.title)}</button>`).join('')}`
+      : '';
+  }
+
+  function renderPending(newId) {
+    list.innerHTML = pending.length
+      ? pending.map((it, i) => {
+        const badges = `${it.carryCount > 0 ? `<span class="carry">${carryLabel(it.carryCount)}</span>` : ''}${parentBadge(it)}`;
+        return it.id === editingId
+          ? `<li class="hw-item" data-id="${it.id}">
+               <span class="hw-no">${i + 1}</span>
+               <input class="ph-edit" maxlength="60" value="${esc(it.title)}" aria-label="숙제 이름 고치기">
+               <button class="icon-btn" data-save="${it.id}" aria-label="저장">✔️</button>
+               <button class="icon-btn" data-cancel aria-label="취소">✖️</button>
+             </li>`
+          : `<li class="hw-item ${it.id === newId ? 'new' : ''}" data-id="${it.id}">
+               <span class="hw-no">${i + 1}</span>
+               <span class="hw-title">${esc(it.title)}${badges}</span>
+               <button class="icon-btn" data-edit="${it.id}" aria-label="고치기">✏️</button>
+               <button class="icon-btn" data-del="${it.id}" aria-label="지우기">🗑️</button>
+             </li>`;
+      }).join('')
+      : '<li class="card empty"><span class="big-emoji">🎉</span>남은 숙제가 없어요.<br>빼먹은 숙제가 있으면 위에서 넣어 주세요.</li>';
+    const editInput = $('.ph-edit', list);
+    if (editInput) { editInput.focus(); editInput.select(); }
+    renderFreq();
+  }
+
+  function renderDone() {
+    const fmt = (ms) => new Date(ms).toLocaleString('ko-KR', { month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    $('#done', el).innerHTML = data.done.length
+      ? data.done.map((it) => {
+        const v = verdictInfo(it);
+        return `
+          <div class="rec">
+            <div class="thumb">✔</div>
+            <div class="r-body">
+              <div class="r-title">${esc(it.title)}${parentBadge(it)}</div>
+              <div class="r-meta"><span class="chipv ${v.cls}">${v.emoji} ${esc(v.label)}</span>${it.score ? stars(it.score) : ''}<small>${fmt(it.doneAt)}</small></div>
+              ${it.aiComment ? `<div class="r-comment">💬 ${esc(it.aiComment)}</div>` : ''}
+              ${it.aiNote ? `<div class="r-note">👪 AI 메모: ${esc(it.aiNote)}</div>` : ''}
+            </div>
+          </div>`;
+      }).join('')
+      : '<p class="empty">아직 클리어한 숙제가 없어요.</p>';
+  }
+
+  let busy = false;
+  async function addTitle(title) {
+    if (busy) return false;
+    busy = true;
+    try {
+      const { item } = await api.adminAddHomework(name, title);
+      pending.push(item);
+      renderPending(item.id);
+      sfx.pop();
+      return true;
+    } catch (err) {
+      fail(err);
+      return false;
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function saveEdit(id) {
+    const field = $('.ph-edit', list);
+    const title = field.value.trim();
+    if (!title) { shake(field); sfx.error(); return; }
+    if (busy) return;
+    busy = true;
+    try {
+      const { item } = await api.adminEditHomework(name, id, title);
+      pending = pending.map((p) => (p.id === id ? item : p));
+      editingId = null;
+      renderPending();
+      sfx.success();
+    } catch (err) {
+      fail(err);
+    } finally {
+      busy = false;
+    }
+  }
+
+  renderPending();
+  renderDone();
+
+  $('#back', el).onclick = () => { sfx.tap(); screenParent(); };
+  $('#add', el).onsubmit = async (e) => {
+    e.preventDefault();
+    const title = input.value.trim();
+    if (!title) { shake(input); sfx.error(); input.focus(); return; }
+    if (await addTitle(title)) input.value = '';
+    input.focus();
+  };
+
+  list.addEventListener('keydown', (e) => {
+    if (!e.target.classList.contains('ph-edit')) return;
+    if (e.key === 'Enter') { e.preventDefault(); saveEdit(editingId); }
+    else if (e.key === 'Escape') { editingId = null; renderPending(); }
+  });
+
+  el.addEventListener('click', async (e) => {
+    const quick = e.target.closest('[data-quick]');
+    if (quick) { addTitle(quick.dataset.quick); return; }
+    const edit = e.target.closest('[data-edit]');
+    if (edit) { sfx.tap(); editingId = edit.dataset.edit; renderPending(); return; }
+    if (e.target.closest('[data-cancel]')) { sfx.tap(); editingId = null; renderPending(); return; }
+    const save = e.target.closest('[data-save]');
+    if (save) { saveEdit(save.dataset.save); return; }
+    const del = e.target.closest('[data-del]');
+    if (del) {
+      sfx.tap();
+      const li = del.closest('li');
+      li.classList.add('out');
+      try {
+        await api.adminDeleteHomework(name, del.dataset.del);
+        await sleep(280);
+        pending = pending.filter((p) => p.id !== del.dataset.del);
+        renderPending();
+      } catch (err) {
+        li.classList.remove('out');
+        fail(err);
+      }
     }
   });
 }

@@ -403,6 +403,13 @@ h1, h2, h3, p { margin: 0; }
 .pc-head h3 { margin: 0; font-size: 1.5rem; font-weight: 400; }
 .pc-head p { opacity: .75; font-size: 1.05rem; }
 .pc-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.carry.by-parent { background: #c9f5df; }
+.ph-edit {
+  flex: 1; min-width: 0; font-family: inherit; font-size: 1.25rem; padding: 8px 14px; color: var(--ink); background: #fff;
+  border: 3px solid var(--ink); border-radius: 14px; outline: none;
+}
+.ph-edit:focus { box-shadow: 0 0 0 4px rgba(79, 124, 255, .35); }
+.rec .r-title .carry { font-size: .85rem; }
 
 /* ───────── 모달 / 오버레이 ───────── */
 .modal-back { position: fixed; inset: 0; z-index: 120; background: rgba(43, 45, 66, .6); display: grid; place-items: center; padding: 16px; animation: fade .2s ease both; }
