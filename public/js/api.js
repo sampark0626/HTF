@@ -3,6 +3,7 @@ const KEY = 'htf_token';
 let token = null;
 try { token = sessionStorage.getItem(KEY); } catch (_) { /* 저장소 사용 불가 */ }
 let onAuthLost = () => {};
+let adminToken = null; // 부모님 메뉴 토큰은 저장하지 않고 메모리에만 둔다
 
 export class ApiError extends Error {
   constructor(message, status) {
@@ -22,14 +23,15 @@ export function setToken(t) {
   } catch (_) { /* 무시 */ }
 }
 
-async function request(method, path, body) {
+async function request(method, path, body, asAdmin = false) {
+  const bearer = asAdmin ? adminToken : token;
   let res;
   try {
     res = await fetch(`/api${path}`, {
       method,
       headers: {
         'content-type': 'application/json',
-        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...(bearer ? { authorization: `Bearer ${bearer}` } : {}),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
@@ -39,7 +41,9 @@ async function request(method, path, body) {
   let data = null;
   try { data = await res.json(); } catch (_) { /* JSON 아님 */ }
   if (!res.ok) {
-    if (res.status === 401 && token) {
+    if (res.status === 401 && asAdmin) {
+      adminToken = null;
+    } else if (res.status === 401 && token) {
       setToken(null);
       onAuthLost();
     }
@@ -52,6 +56,7 @@ export const api = {
   config: () => request('GET', '/config'),
   register: (p) => request('POST', '/register', p),
   login: (name, pin) => request('POST', '/login', { name, pin }),
+  setPin: (name, pin) => request('POST', '/set-pin', { name, pin }),
   me: () => request('GET', '/me'),
   updateMe: (p) => request('PUT', '/me', p),
   htf: () => request('GET', '/htf'),
@@ -62,6 +67,11 @@ export const api = {
   clear: (id, image) => request('POST', `/homework/${id}/clear`, { image }),
   reanalyze: (id) => request('POST', `/homework/${id}/reanalyze`, {}),
   records: () => request('GET', '/records'),
+  // 부모님 메뉴
+  adminLogin: async (code) => { adminToken = (await request('POST', '/admin/login', { code })).token; },
+  adminLogout: () => { adminToken = null; },
+  adminKids: () => request('GET', '/admin/kids', undefined, true),
+  adminAction: (name, action) => request('POST', `/admin/kids/${encodeURIComponent(name)}/${action}`, {}, true),
 };
 
 // 사진은 로그인 토큰이 있어야 볼 수 있어서, 헤더를 붙여 받아온 뒤 blob URL 로 보여 준다.

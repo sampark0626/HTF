@@ -5,9 +5,13 @@ const express = require('express');
 const { open } = require('./db');
 const auth = require('./auth');
 const ai = require('./ai');
+const avatars = require('./avatar');
 
 const PORT = process.env.PORT || 3000;
 const KIDS = (process.env.KIDS || '박준선,박준혁').split(',').map((s) => s.trim()).filter(Boolean);
+const ADMIN_CODE = process.env.ADMIN_CODE || '';
+const ADMIN_TTL_MS = 30 * 60 * 1000;
+const kidIndex = (name) => Math.max(0, KIDS.indexOf(name));
 const MAX_PHOTO_BYTES = 3 * 1024 * 1024;
 const MAX_PENDING = 30;
 
@@ -36,6 +40,7 @@ const publicUser = (u) => ({
   school: u.school,
   className: u.class_name,
   timerMin: u.timer_min,
+  avatar: avatars.parseAvatar(u.avatar, kidIndex(u.name)),
 });
 
 const publicItem = (h) => ({
@@ -85,12 +90,21 @@ async function main() {
   app.get('/healthz', (req, res) => res.json({ ok: true }));
 
   app.get('/api/config', async (req, res) => {
-    const rows = await db.query('SELECT name FROM users');
-    const registered = new Set(rows.map((r) => r.name));
+    const rows = await db.query('SELECT name, avatar, pin_hash FROM users');
+    const byName = new Map(rows.map((r) => [r.name, r]));
     res.json({
-      kids: KIDS.map((name) => ({ name, registered: registered.has(name) })),
+      kids: KIDS.map((name, i) => {
+        const u = byName.get(name);
+        return {
+          name,
+          registered: Boolean(u),
+          needsPin: Boolean(u) && !u.pin_hash, // 부모님이 비밀번호를 초기화한 상태
+          avatar: u ? avatars.parseAvatar(u.avatar, i) : avatars.defaultAvatar(i),
+        };
+      }),
       persistent: db.persistent,
       aiEnabled: ai.isEnabled(),
+      adminEnabled: Boolean(ADMIN_CODE),
     });
   });
 
@@ -105,14 +119,15 @@ async function main() {
     if (!school) throw new HttpError(400, '학교 이름을 적어 주세요');
     if (!className) throw new HttpError(400, '학년/반을 적어 주세요');
     if (!/^\d{4}$/.test(pin)) throw new HttpError(400, '비밀번호는 숫자 4자리예요');
+    const avatar = avatars.sanitizeAvatar(req.body.avatar) || avatars.defaultAvatar(kidIndex(name));
     const exists = await db.query('SELECT id FROM users WHERE name = $1', [name]);
     if (exists.length) throw new HttpError(409, '이미 등록된 친구예요. 비밀번호로 들어와 주세요');
     const now = Date.now();
     const id = uid();
     await db.query(
-      `INSERT INTO users (id, name, birth, school, class_name, pin_hash, timer_min, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, 40, $7, $7)`,
-      [id, name, birth, school, className, auth.hashPin(pin), now]
+      `INSERT INTO users (id, name, birth, school, class_name, pin_hash, avatar, timer_min, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 40, $8, $8)`,
+      [id, name, birth, school, className, auth.hashPin(pin), JSON.stringify(avatar), now]
     );
     const [user] = await db.query('SELECT * FROM users WHERE id = $1', [id]);
     res.json({ token: auth.issueToken(id, secret), user: publicUser(user) });
@@ -126,12 +141,31 @@ async function main() {
     if (wait) throw new HttpError(429, `잠깐 쉬었다 다시 해요 (${wait}초 후)`);
     const [user] = await db.query('SELECT * FROM users WHERE name = $1', [name]);
     if (!user) throw new HttpError(404, '아직 등록 전이에요');
+    if (!user.pin_hash) throw new HttpError(409, '새 비밀번호를 먼저 정해 주세요');
     if (!/^\d{4}$/.test(pin) || !auth.verifyPin(pin, user.pin_hash)) {
       auth.recordFail(name);
       throw new HttpError(401, '비밀번호가 달라요');
     }
     auth.clearFails(name);
     res.json({ token: auth.issueToken(user.id, secret), user: publicUser(user) });
+  });
+
+  // 부모님이 비밀번호를 초기화한 친구만, 새 비밀번호를 직접 정할 수 있다
+  app.post('/api/set-pin', async (req, res) => {
+    const name = str(req.body.name, 20);
+    const pin = str(req.body.pin, 4);
+    if (!KIDS.includes(name)) throw new HttpError(400, '등록된 이름이 아니에요');
+    if (!/^\d{4}$/.test(pin)) throw new HttpError(400, '비밀번호는 숫자 4자리예요');
+    const [user] = await db.query('SELECT * FROM users WHERE name = $1', [name]);
+    if (!user || user.pin_hash) throw new HttpError(409, '지금은 비밀번호를 새로 정할 수 없어요');
+    // 동시에 두 번 눌려도 한 번만 반영되게 조건을 건다
+    const done = await db.query(
+      "UPDATE users SET pin_hash = $1, updated_at = $2 WHERE id = $3 AND pin_hash = '' RETURNING id",
+      [auth.hashPin(pin), Date.now(), user.id]
+    );
+    if (!done.length) throw new HttpError(409, '지금은 비밀번호를 새로 정할 수 없어요');
+    const [fresh] = await db.query('SELECT * FROM users WHERE id = $1', [user.id]);
+    res.json({ token: auth.issueToken(fresh.id, secret), user: publicUser(fresh) });
   });
 
   // ───────── 로그인 필요 API ─────────
@@ -162,6 +196,12 @@ async function main() {
     if (!validBirth(birth)) throw new HttpError(400, '생년월일을 다시 확인해 주세요');
     if (!school) throw new HttpError(400, '학교 이름을 적어 주세요');
     if (!className) throw new HttpError(400, '학년/반을 적어 주세요');
+    let avatarJson = u.avatar;
+    if (b.avatar !== undefined) {
+      const a = avatars.sanitizeAvatar(b.avatar);
+      if (!a) throw new HttpError(400, '캐릭터를 다시 골라 주세요');
+      avatarJson = JSON.stringify(a);
+    }
     let pinHash = u.pin_hash;
     if (b.newPin !== undefined) {
       if (!/^\d{4}$/.test(String(b.newPin))) throw new HttpError(400, '새 비밀번호는 숫자 4자리예요');
@@ -169,9 +209,9 @@ async function main() {
       pinHash = auth.hashPin(String(b.newPin));
     }
     await db.query(
-      `UPDATE users SET birth = $1, school = $2, class_name = $3, timer_min = $4, pin_hash = $5, updated_at = $6
-       WHERE id = $7`,
-      [birth, school, className, timerMin, pinHash, Date.now(), u.id]
+      `UPDATE users SET birth = $1, school = $2, class_name = $3, timer_min = $4, pin_hash = $5, avatar = $6, updated_at = $7
+       WHERE id = $8`,
+      [birth, school, className, timerMin, pinHash, avatarJson, Date.now(), u.id]
     );
     const [fresh] = await db.query('SELECT * FROM users WHERE id = $1', [u.id]);
     res.json({ user: publicUser(fresh) });
@@ -363,6 +403,99 @@ async function main() {
     res.send(p.data);
   });
 
+  // ───────── 부모님 메뉴: 초기화·비밀번호 재설정 (환경변수 ADMIN_CODE 가 있어야 켜진다) ─────────
+  const admin = express.Router();
+
+  admin.post('/login', async (req, res) => {
+    if (!ADMIN_CODE) throw new HttpError(503, '부모님 비밀번호(ADMIN_CODE)가 아직 설정되지 않았어요');
+    const wait = auth.lockedFor('__admin');
+    if (wait) throw new HttpError(429, `잠깐 쉬었다 다시 해요 (${wait}초 후)`);
+    if (!auth.codeMatches(str(req.body.code, 100), ADMIN_CODE)) {
+      auth.recordFail('__admin');
+      throw new HttpError(401, '부모님 비밀번호가 달라요');
+    }
+    auth.clearFails('__admin');
+    res.json({ token: auth.issueToken('admin', secret, ADMIN_TTL_MS) });
+  });
+
+  admin.use((req, res, next) => {
+    const m = /^Bearer (.+)$/.exec(req.get('authorization') || '');
+    if (!ADMIN_CODE || !m || auth.readToken(m[1], secret) !== 'admin') {
+      throw new HttpError(401, '부모님 비밀번호를 다시 입력해 주세요');
+    }
+    next();
+  });
+
+  admin.get('/kids', async (req, res) => {
+    const kids = [];
+    for (const name of KIDS) {
+      // eslint-disable-next-line no-await-in-loop
+      const [u] = await db.query('SELECT * FROM users WHERE name = $1', [name]);
+      if (!u) {
+        kids.push({ name, registered: false, avatar: avatars.defaultAvatar(kidIndex(name)) });
+        continue; // eslint-disable-line no-continue
+      }
+      // eslint-disable-next-line no-await-in-loop
+      const [c] = await db.query(
+        `SELECT COUNT(*) FILTER (WHERE status = 'done') AS done,
+                COUNT(*) FILTER (WHERE status = 'pending') AS pending
+         FROM homework WHERE user_id = $1`,
+        [u.id]
+      );
+      // eslint-disable-next-line no-await-in-loop
+      const [p] = await db.query('SELECT COUNT(*) AS n FROM photos WHERE user_id = $1', [u.id]);
+      kids.push({
+        name,
+        registered: true,
+        needsPin: !u.pin_hash,
+        avatar: avatars.parseAvatar(u.avatar, kidIndex(name)),
+        school: u.school,
+        className: u.class_name,
+        done: Number(c.done),
+        pending: Number(c.pending),
+        photos: Number(p.n),
+      });
+    }
+    res.json({ kids });
+  });
+
+  async function kidFromParam(req) {
+    if (!KIDS.includes(req.params.name)) throw new HttpError(404, '없는 친구예요');
+    const [u] = await db.query('SELECT * FROM users WHERE name = $1', [req.params.name]);
+    if (!u) throw new HttpError(404, '아직 등록 전이에요');
+    return u;
+  }
+
+  async function wipeRecords(userId) {
+    await db.query('DELETE FROM photos WHERE user_id = $1', [userId]);
+    await db.query('DELETE FROM homework WHERE user_id = $1', [userId]);
+    await db.query('DELETE FROM sessions WHERE user_id = $1', [userId]);
+  }
+
+  // 숙제·사진·HTF 기록만 지운다 (프로필·캐릭터·비밀번호는 그대로)
+  admin.post('/kids/:name/clear-records', async (req, res) => {
+    const u = await kidFromParam(req);
+    await wipeRecords(u.id);
+    res.json({ ok: true });
+  });
+
+  // 기록과 프로필을 모두 지워 "처음 로그인" 상태로 되돌린다
+  admin.post('/kids/:name/reset-all', async (req, res) => {
+    const u = await kidFromParam(req);
+    await wipeRecords(u.id);
+    await db.query('DELETE FROM users WHERE id = $1', [u.id]);
+    res.json({ ok: true });
+  });
+
+  // 비밀번호만 비운다 → 다음 로그인에서 새 비밀번호를 정한다 (기록은 그대로)
+  admin.post('/kids/:name/reset-pin', async (req, res) => {
+    const u = await kidFromParam(req);
+    await db.query("UPDATE users SET pin_hash = '', updated_at = $1 WHERE id = $2", [Date.now(), u.id]);
+    auth.clearFails(u.name);
+    res.json({ ok: true });
+  });
+
+  app.use('/api/admin', admin);
   app.use('/api', api);
   app.use('/api', (req, res) => res.status(404).json({ error: '없는 주소예요' }));
 

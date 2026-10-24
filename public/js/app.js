@@ -2,6 +2,7 @@ import { api, setToken, hasToken, setAuthLostHandler, photoUrl, clearPhotoCache 
 import { sfx } from './sfx.js';
 import { confetti, celebrate, sparkle } from './fx.js';
 import { openCamera } from './camera.js';
+import { avatarHtml, defaultAvatar, mountAvatarPicker } from './avatar.js';
 
 // ───────────────────────── 공통 도구 ─────────────────────────
 const $ = (s, r = document) => r.querySelector(s);
@@ -12,12 +13,6 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const fmtClock = (ms) => new Date(ms).toLocaleTimeString('ko-KR', { hour: 'numeric', minute: '2-digit' });
 const fmtMMSS = (sec) => `${pad2(Math.floor(sec / 60))}:${pad2(sec % 60)}`;
 
-const AVATARS = [
-  { emoji: '🦊', color: '#4f7cff' },
-  { emoji: '🐯', color: '#ff9f43' },
-  { emoji: '🐼', color: '#2ecc95' },
-  { emoji: '🐰', color: '#ff7eb6' },
-];
 const MESSAGES = [
   'HTF 준비 시간이에요! 📚',
   '책상 위를 깨끗이 치워요 🧹',
@@ -39,9 +34,12 @@ const state = {
   finishing: false,
 };
 
+// 로그인한 친구는 내 캐릭터, 그 밖에는 서버가 알려 준 캐릭터(없으면 기본)
 const avatarOf = (name) => {
-  const i = Math.max(0, (state.config?.kids || []).findIndex((k) => k.name === name));
-  return AVATARS[i % AVATARS.length];
+  if (state.user && state.user.name === name) return state.user.avatar;
+  const kids = state.config?.kids || [];
+  const i = Math.max(0, kids.findIndex((k) => k.name === name));
+  return (kids[i] && kids[i].avatar) || defaultAvatar(i);
 };
 
 let cleanups = [];
@@ -108,10 +106,9 @@ const shake = (el) => { el.classList.remove('shake'); void el.offsetWidth; el.cl
 function setTopbar(mode) {
   const bar = $('#topbar');
   if (mode === 'none' || !state.user) { bar.hidden = true; bar.innerHTML = ''; return; }
-  const av = avatarOf(state.user.name);
   bar.hidden = false;
   bar.innerHTML = `
-    <div class="who"><span class="avatar sm" style="--c:${av.color}">${av.emoji}</span><b>${esc(state.user.name)}</b></div>
+    <div class="who">${avatarHtml(state.user.avatar, { size: 'sm' })}<b>${esc(state.user.name)}</b></div>
     <div class="bar-actions">
       <button class="icon-btn" data-bar="mute" aria-label="소리 켜기/끄기">${sfx.muted ? '🔇' : '🔊'}</button>
       ${mode === 'full' ? '<button class="pill-btn" data-bar="mypage">👤 마이페이지</button><button class="pill-btn" data-bar="logout">🚪 나가기</button>' : ''}
@@ -193,23 +190,26 @@ function renderLogin() {
     <h2 class="ask">누가 숙제할 거예요?</h2>
     <div class="kid-cards">
       ${kids.map((k, i) => `
-        <button class="kid-card" data-name="${esc(k.name)}" style="--c:${AVATARS[i % AVATARS.length].color};--d:${i * 0.15}s">
-          <span class="avatar xl">${AVATARS[i % AVATARS.length].emoji}</span>
+        <button class="kid-card" data-name="${esc(k.name)}" style="--d:${i * 0.15}s">
+          ${avatarHtml(k.avatar, { size: 'xl', bob: true })}
           <span>${esc(k.name)}</span>
-          ${k.registered ? '' : '<span class="new-badge">처음이에요 ✨</span>'}
+          ${!k.registered ? '<span class="new-badge">처음이에요 ✨</span>' : k.needsPin ? '<span class="new-badge">새 비밀번호 🔑</span>' : ''}
         </button>`).join('')}
     </div>
     ${persistent ? '' : '<p class="foot-note warn">⚠️ 임시 저장 모드예요. 서버가 다시 켜지면 기록이 지워질 수 있어요. (부모님께 알려 주세요)</p>'}
     ${aiEnabled ? '' : '<p class="foot-note">AI 선생님은 아직 준비 중이에요. (사진은 저장돼요)</p>'}
+    <button class="back-link parent-link" id="parent">👪 부모님 메뉴</button>
   `, 'center');
   el.addEventListener('click', (e) => {
+    if (e.target.closest('#parent')) { sfx.tap(); screenParentLogin(); return; }
     const card = e.target.closest('.kid-card');
     if (!card) return;
     sfx.unlock();
     sfx.pop();
     const kid = state.config.kids.find((k) => k.name === card.dataset.name);
-    if (kid.registered) screenPin(kid.name);
-    else screenSetup(kid.name);
+    if (!kid.registered) screenSetup(kid.name);
+    else if (kid.needsPin) screenNewPin(kid.name);
+    else screenPin(kid.name);
   });
 }
 
@@ -275,7 +275,7 @@ function screenPin(name) {
   mount(`
     <div class="pin-screen">
       <button class="back-link" id="back">← 다른 친구</button>
-      <span class="avatar xl bob" style="--c:${av.color}">${av.emoji}</span>
+      ${avatarHtml(av, { size: 'xl', bob: true })}
       <h2>${esc(name)}, 안녕! 👋</h2>
       <p>비밀번호 숫자 4개를 눌러 주세요</p>
       <div id="pad"></div>
@@ -288,6 +288,54 @@ function screenPin(name) {
       return { error: err.message };
     }
     return undefined;
+  });
+}
+
+// 비밀번호를 새로 정하는 화면 (숫자 4개를 두 번 눌러 확인). 첫 로그인과 "부모님이 초기화한 뒤"가 함께 쓴다.
+function pinSetScreen({ title, backLabel, onBack, submit }) {
+  let first = null;
+  const el = mount(`
+    <div class="pin-screen">
+      <button class="back-link" id="back">${esc(backLabel)}</button>
+      <h2 id="ttl">${esc(title)}</h2>
+      <p id="hint">숫자 4개를 눌러 주세요. 다음에 올 때 이 번호가 필요해요!</p>
+      <div id="pad"></div>
+    </div>`, 'center');
+  const reset = () => {
+    first = null;
+    $('#ttl', el).textContent = title;
+    $('#hint', el).textContent = '숫자 4개를 눌러 주세요';
+  };
+  $('#back', el).onclick = () => { sfx.tap(); onBack(); };
+  pinPad($('#pad', el), async (pin) => {
+    if (!first) {
+      first = pin;
+      $('#ttl', el).textContent = '한 번 더 눌러 주세요 🔁';
+      $('#hint', el).textContent = '같은 번호를 다시 눌러 확인해요';
+      return { next: true };
+    }
+    if (pin !== first) {
+      reset();
+      return { error: '번호가 달라요. 처음부터 다시 해요' };
+    }
+    try {
+      await submit(pin);
+    } catch (err) {
+      reset();
+      return { error: err.message };
+    }
+    return undefined;
+  });
+}
+
+// 부모님이 비밀번호를 초기화한 친구: 새 비밀번호를 직접 정한다 (기록은 그대로)
+function screenNewPin(name) {
+  setTopbar('none');
+  pinSetScreen({
+    title: `${name}, 새 비밀번호를 정해요 🔑`,
+    backLabel: '← 다른 친구',
+    onBack: screenLogin,
+    submit: async (pin) => afterAuth(await api.setPin(name, pin)),
   });
 }
 
@@ -321,14 +369,14 @@ function readBirth(root) {
 
 function screenSetup(name) {
   setTopbar('none');
-  const av = avatarOf(name);
+  let avatar = avatarOf(name);
   const profile = { birth: '', school: '', className: '' };
 
   function stepProfile() {
     const el = mount(`
       <button class="back-link" id="back">← 다른 친구</button>
       <form class="card form-card" id="form" autocomplete="off" novalidate>
-        <span class="avatar xl bob" style="--c:${av.color};align-self:center">${av.emoji}</span>
+        <div style="align-self:center">${avatarHtml(avatar, { size: 'xl', bob: true })}</div>
         <h2>${esc(name)}, 처음 왔구나! 👋</h2>
         <p class="sub">나를 소개해 줘요. (나중에 마이페이지에서 고칠 수 있어요)</p>
         ${birthFields(profile.birth)}
@@ -354,40 +402,31 @@ function screenSetup(name) {
       }
       Object.assign(profile, { birth, school, className });
       sfx.pop();
-      stepPin();
+      stepAvatar();
     };
   }
 
-  function stepPin() {
-    let first = null;
+  // 나를 나타내는 캐릭터 꾸미기
+  function stepAvatar() {
     const el = mount(`
-      <div class="pin-screen">
-        <button class="back-link" id="back">← 고치기</button>
-        <h2 id="ttl">비밀번호를 정해요 🔑</h2>
-        <p id="hint">숫자 4개를 눌러 주세요. 다음에 올 때 이 번호가 필요해요!</p>
-        <div id="pad"></div>
+      <button class="back-link" id="back">← 고치기</button>
+      <div class="card form-card avatar-card">
+        <h2>나를 닮은 캐릭터를 꾸며요 🎨</h2>
+        <p class="sub">친구, 색깔, 꾸미기를 골라 보세요. (나중에 마이페이지에서 또 바꿀 수 있어요)</p>
+        <div id="picker"></div>
+        <button class="btn btn-blue big" id="next">다음 ➡️</button>
       </div>`, 'center');
-    $('#back', el).onclick = () => { sfx.tap(); stepProfile(); };
-    pinPad($('#pad', el), async (pin) => {
-      if (!first) {
-        first = pin;
-        $('#ttl', el).textContent = '한 번 더 눌러 주세요 🔁';
-        $('#hint', el).textContent = '같은 번호를 다시 눌러 확인해요';
-        return { next: true };
-      }
-      if (pin !== first) {
-        first = null;
-        $('#ttl', el).textContent = '비밀번호를 정해요 🔑';
-        $('#hint', el).textContent = '숫자 4개를 눌러 주세요';
-        return { error: '번호가 달라요. 처음부터 다시 해요' };
-      }
-      try {
-        await afterAuth(await api.register({ name, ...profile, pin }));
-      } catch (err) {
-        first = null;
-        return { error: err.message };
-      }
-      return undefined;
+    const picker = mountAvatarPicker($('#picker', el), avatar);
+    $('#back', el).onclick = () => { avatar = picker.get(); sfx.tap(); stepProfile(); };
+    $('#next', el).onclick = () => { avatar = picker.get(); sfx.pop(); stepPin(); };
+  }
+
+  function stepPin() {
+    pinSetScreen({
+      title: '비밀번호를 정해요 🔑',
+      backLabel: '← 캐릭터 고치기',
+      onBack: stepAvatar,
+      submit: async (pin) => afterAuth(await api.register({ name, ...profile, avatar, pin })),
     });
   }
 
@@ -400,12 +439,11 @@ const carryLabel = (n) => (n >= 2 ? `🔁 ${n}번째 이어하기` : '🔁 지�
 function screenHomework() {
   setTopbar('full');
   state.timeUp = false;
-  const av = avatarOf(state.user.name);
   const pending = () => state.items.filter((i) => i.status === 'pending');
   const el = mount(`
     <div class="hw">
       <div class="hw-head">
-        <span class="avatar bob" style="--c:${av.color}">${av.emoji}</span>
+        ${avatarHtml(state.user.avatar, { size: 'lg', bob: true })}
         <div><h2>오늘의 Homework ✏️</h2><p>${esc(state.user.name)}, 오늘 할 숙제를 모두 적어 보자!</p></div>
       </div>
       <form class="add-row" id="add" autocomplete="off">
@@ -914,6 +952,7 @@ function screenMyPage() {
       <button class="back-link" id="back">← 돌아가기</button>
       <div class="tabs">
         <button class="tab on" data-tab="info">👤 내 정보</button>
+        <button class="tab" data-tab="avatar">🎨 캐릭터</button>
         <button class="tab" data-tab="rec">📒 숙제 기록</button>
       </div>
       <div id="pane"></div>
@@ -925,8 +964,37 @@ function screenMyPage() {
     if (!t) return;
     sfx.tap();
     $$('.tab', el).forEach((b) => b.classList.toggle('on', b === t));
-    if (t.dataset.tab === 'info') paneInfo(); else paneRecords();
+    if (t.dataset.tab === 'info') paneInfo();
+    else if (t.dataset.tab === 'avatar') paneAvatar();
+    else paneRecords();
   });
+
+  function paneAvatar() {
+    pane.innerHTML = `
+      <div class="card form-card avatar-card" style="width:100%">
+        <h2>내 캐릭터 🎨</h2>
+        <div id="picker"></div>
+        <button class="btn btn-blue big" id="save">💾 이 모습으로 저장</button>
+      </div>`;
+    const picker = mountAvatarPicker($('#picker', pane), u.avatar);
+    const save = $('#save', pane);
+    save.onclick = async () => {
+      save.disabled = true;
+      try {
+        const r = await api.updateMe({ avatar: picker.get() });
+        Object.assign(u, r.user);
+        state.user = u;
+        setTopbar('full');
+        sfx.success();
+        confetti({ count: 60, y: 0.7 });
+        toast('새 캐릭터로 바꿨어요! ✅');
+      } catch (err) {
+        toast(err.message, 'err');
+        sfx.error();
+      }
+      save.disabled = false;
+    };
+  }
 
   function paneInfo() {
     pane.innerHTML = `
@@ -1033,6 +1101,119 @@ function screenMyPage() {
   }
 
   paneInfo();
+}
+
+// ───────────────────────── 8. 부모님 메뉴 (초기화) ─────────────────────────
+function screenParentLogin() {
+  setTopbar('none');
+  const enabled = state.config.adminEnabled;
+  const el = mount(`
+    <div class="pin-screen">
+      <button class="back-link" id="back">← 돌아가기</button>
+      <div class="boot-clock" style="font-size:4rem">👪</div>
+      <h2>부모님 메뉴</h2>
+      ${enabled ? `
+        <p>부모님 비밀번호를 입력해 주세요</p>
+        <form class="form-card" id="form" autocomplete="off">
+          <div class="field"><input id="code" type="password" autocomplete="off" aria-label="부모님 비밀번호"></div>
+          <p class="err" id="err" aria-live="polite"></p>
+          <button class="btn btn-blue" type="submit">들어가기</button>
+        </form>` : `
+        <p class="foot-note warn">아직 부모님 비밀번호가 없어요.<br>Render 환경변수 <b>ADMIN_CODE</b> 를 정하면 쓸 수 있어요.</p>`}
+    </div>`, 'center');
+  $('#back', el).onclick = () => { sfx.tap(); screenLogin(); };
+  if (!enabled) return;
+  const code = $('#code', el);
+  code.focus();
+  $('#form', el).onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api.adminLogin(code.value);
+      sfx.success();
+      screenParent();
+    } catch (err) {
+      $('#err', el).textContent = err.message;
+      shake($('#form', el));
+      sfx.error();
+      code.select();
+    }
+  };
+}
+
+const PARENT_ACTIONS = {
+  'clear-records': {
+    title: '숙제 기록을 모두 지울까요? 🧹',
+    text: '숙제·사진·AI 판독 기록이 사라져요. 프로필과 캐릭터, 비밀번호는 그대로예요.',
+    done: '기록을 지웠어요',
+  },
+  'reset-pin': {
+    title: '비밀번호를 다시 정하게 할까요? 🔑',
+    text: '다음에 로그인할 때 새 비밀번호를 정해요. 기록은 그대로예요.',
+    done: '다음 로그인 때 새 비밀번호를 정해요',
+  },
+  'reset-all': {
+    title: '처음부터 다시 할까요? 🔄',
+    text: '기록과 프로필, 캐릭터, 비밀번호가 모두 지워지고 처음 로그인 상태로 돌아가요. 되돌릴 수 없어요.',
+    done: '처음 상태로 되돌렸어요',
+  },
+};
+
+async function screenParent() {
+  setTopbar('none');
+  let kids;
+  try {
+    ({ kids } = await api.adminKids());
+  } catch (err) {
+    toast(err.message, 'err');
+    screenParentLogin();
+    return;
+  }
+  const card = (k) => `
+    <div class="card parent-card" data-name="${esc(k.name)}">
+      <div class="pc-head">
+        ${avatarHtml(k.avatar, { size: 'lg' })}
+        <div>
+          <h3>${esc(k.name)}</h3>
+          <p>${k.registered
+    ? `${esc(k.school)} ${esc(k.className)}<br>클리어 ${k.done}개 · 남은 숙제 ${k.pending}개 · 사진 ${k.photos}장${k.needsPin ? ' · 🔑 새 비밀번호 대기 중' : ''}`
+    : '아직 등록 전이에요'}</p>
+        </div>
+      </div>
+      ${k.registered ? `
+        <div class="pc-actions">
+          <button class="btn btn-white small" data-act="clear-records">🧹 기록만 지우기</button>
+          <button class="btn btn-white small" data-act="reset-pin">🔑 비밀번호 다시 정하기</button>
+          <button class="btn btn-coral small" data-act="reset-all">🔄 처음부터 다시</button>
+        </div>` : ''}
+    </div>`;
+  const el = mount(`
+    <div class="my">
+      <button class="back-link" id="back">← 나가기</button>
+      <h2 style="font-size:2rem">👪 부모님 메뉴</h2>
+      <p class="sub">테스트한 기록을 지우거나, 비밀번호를 잊은 친구를 도와줄 수 있어요.</p>
+      ${kids.map(card).join('')}
+    </div>`);
+  $('#back', el).onclick = () => { sfx.tap(); api.adminLogout(); screenLogin(); };
+  el.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    sfx.tap();
+    const name = btn.closest('.parent-card').dataset.name;
+    const a = PARENT_ACTIONS[btn.dataset.act];
+    if (!(await confirmDialog({ title: `${name}: ${a.title}`, text: a.text, yes: '네, 할게요', no: '아니요' }))) return;
+    btn.disabled = true;
+    try {
+      await api.adminAction(name, btn.dataset.act);
+      sfx.success();
+      toast(`${name}: ${a.done} ✅`);
+      state.config = await api.config();
+      screenParent();
+    } catch (err) {
+      btn.disabled = false;
+      toast(err.message, 'err');
+      sfx.error();
+    }
+  });
 }
 
 // ───────────────────────── 시작 ─────────────────────────

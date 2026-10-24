@@ -112,8 +112,17 @@ h1, h2, h3, p { margin: 0; }
   --s: 64px; width: var(--s); height: var(--s); border-radius: 50%; display: inline-grid; place-items: center;
   background: var(--c, var(--blue)); border: 3px solid var(--ink); font-size: calc(var(--s) * .56); line-height: 1; flex: none;
 }
+.avatar { position: relative; }
+.avatar .face { line-height: 1; }
+.avatar .acc { position: absolute; font-size: calc(var(--s) * .42); line-height: 1; pointer-events: none; filter: drop-shadow(0 2px 0 rgba(43, 45, 66, .25)); }
+.avatar .acc.pos-top { top: calc(var(--s) * -.24); left: 50%; transform: translateX(-50%); }
+.avatar .acc.pos-eyes { top: 27%; left: 50%; transform: translateX(-50%); font-size: calc(var(--s) * .4); }
+.avatar .acc.pos-tr { top: -8%; right: -10%; transform: rotate(14deg); }
+.avatar .acc.pos-tl { top: -8%; left: -10%; transform: rotate(-14deg); }
 .avatar.sm { --s: 34px; border-width: 2px; }
+.avatar.lg { --s: 76px; }
 .avatar.xl { --s: 112px; border-width: 4px; box-shadow: var(--shadow-s); }
+.avatar.xxl { --s: 150px; border-width: 5px; box-shadow: var(--shadow); }
 .bob { animation: bob 2.2s ease-in-out infinite; }
 
 .field { display: flex; flex-direction: column; gap: 6px; text-align: left; }
@@ -146,7 +155,7 @@ h1, h2, h3, p { margin: 0; }
   animation: card-in .6s cubic-bezier(.2, 1.2, .3, 1) both; animation-delay: var(--d, 0s);
   transition: transform .12s, box-shadow .12s;
 }
-.kid-card .avatar { --c: var(--c); animation: bob 2.4s ease-in-out infinite; }
+.kid-card .avatar { animation: bob 2.4s ease-in-out infinite; }
 .kid-card:hover { transform: translateY(-6px) rotate(-1.5deg); }
 .kid-card:active { transform: translateY(4px); box-shadow: 0 2px 0 var(--ink); }
 .kid-card:hover .avatar { animation: wiggle .5s ease-in-out infinite; }
@@ -183,7 +192,6 @@ h1, h2, h3, p { margin: 0; }
 .hw-head { display: flex; align-items: center; gap: 14px; }
 .hw-head h2 { font-size: 2.1rem; }
 .hw-head p { opacity: .75; }
-.hw-head .avatar { --s: 76px; }
 .add-row { display: flex; gap: 10px; }
 .add-row input {
   flex: 1; min-width: 0; font-family: inherit; font-size: 1.4rem; padding: 12px 18px; border: var(--line); border-radius: 20px; min-height: 62px; outline: none; background: #fff; color: var(--ink);
@@ -358,6 +366,40 @@ h1, h2, h3, p { margin: 0; }
 .chipv { display: inline-flex; align-items: center; gap: 6px; border: 3px solid var(--ink); border-radius: 999px; padding: 1px 12px; font-size: .98rem; background: #fff; width: fit-content; }
 .chipv.good { background: #c9f5df; } .chipv.okay { background: #fff2b8; } .chipv.poor { background: #ffd9d4; } .chipv.unv { background: #e8e8f2; } .chipv.wait { background: #e9ddff; }
 .rec .r-meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* ───────── 캐릭터 꾸미기 ───────── */
+.avatar-card { width: min(640px, 100%); }
+.ap { display: grid; gap: 14px; }
+.ap-preview { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 22px 0 6px; }
+.ap-stage { padding-top: 34px; }
+.ap-stage.jump { animation: avatar-jump .55s cubic-bezier(.2, 1.6, .3, 1); }
+@keyframes avatar-jump { 0% { transform: scale(.8) rotate(-8deg); } 55% { transform: scale(1.15) rotate(6deg); } 100% { transform: none; } }
+.ap-group h4 { margin: 0 0 8px; font-size: 1.15rem; font-weight: 400; text-align: left; }
+.ap-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+.ap-opt {
+  width: 58px; height: 58px; display: grid; place-items: center; font-size: 1.8rem; line-height: 1; cursor: pointer;
+  background: #fff; border: 3px solid var(--ink); border-radius: 18px; box-shadow: 0 3px 0 var(--ink); transition: transform .1s, background .15s;
+}
+.ap-opt:hover { transform: translateY(-3px) rotate(-3deg); }
+.ap-opt:active { transform: translateY(2px); box-shadow: 0 1px 0 var(--ink); }
+.ap-opt.on { background: var(--yellow); transform: translateY(-3px); box-shadow: 0 6px 0 var(--ink); }
+.ap-opt.dot { background: var(--c); border-radius: 50%; }
+.ap-opt.dot.on { outline: 4px solid var(--ink); outline-offset: 2px; background: var(--c); }
+
+/* 넓은 화면(태블릿 가로): 미리보기는 왼쪽에 고정, 고르는 곳은 오른쪽 */
+@media (min-width: 900px) {
+  .avatar-card { width: min(920px, 100%); }
+  .ap { grid-template-columns: 280px 1fr; align-items: start; gap: 8px 24px; }
+  .ap-preview { grid-row: 1 / span 3; position: sticky; top: 90px; padding-top: 30px; }
+}
+
+/* ───────── 부모님 메뉴 ───────── */
+.parent-link { align-self: center; margin-top: 18px; opacity: .55; font-size: 1rem; }
+.parent-card { display: grid; gap: 14px; }
+.pc-head { display: flex; align-items: center; gap: 14px; }
+.pc-head h3 { margin: 0; font-size: 1.5rem; font-weight: 400; }
+.pc-head p { opacity: .75; font-size: 1.05rem; }
+.pc-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 
 /* ───────── 모달 / 오버레이 ───────── */
 .modal-back { position: fixed; inset: 0; z-index: 120; background: rgba(43, 45, 66, .6); display: grid; place-items: center; padding: 16px; animation: fade .2s ease both; }

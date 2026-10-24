@@ -25,9 +25,17 @@ function sign(body, secret) {
   return crypto.createHmac('sha256', secret).update(body).digest('base64url');
 }
 
-function issueToken(userId, secret) {
-  const body = b64url(JSON.stringify({ uid: userId, exp: Date.now() + TOKEN_TTL_MS }));
+function issueToken(userId, secret, ttlMs = TOKEN_TTL_MS) {
+  const body = b64url(JSON.stringify({ uid: userId, exp: Date.now() + ttlMs }));
   return `${body}.${sign(body, secret)}`;
+}
+
+// 부모님 코드 비교 (길이가 달라도 시간 차이가 나지 않게 해시로 비교)
+function codeMatches(input, expected) {
+  if (!expected) return false;
+  const a = crypto.createHash('sha256').update(String(input)).digest();
+  const b = crypto.createHash('sha256').update(String(expected)).digest();
+  return crypto.timingSafeEqual(a, b);
 }
 
 function readToken(token, secret) {
@@ -86,6 +94,6 @@ async function loadSecret(db) {
 }
 
 module.exports = {
-  hashPin, verifyPin, issueToken, readToken,
+  hashPin, verifyPin, issueToken, readToken, codeMatches,
   lockedFor, recordFail, clearFails, loadSecret,
 };
