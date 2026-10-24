@@ -1,0 +1,68 @@
+# HTF · Homework Time Forty ⏱️
+
+아이들이 40분 동안 숙제를 하고, 하나씩 **클리어 → 셀카로 결과물 촬영 → Gemini 가 성의 판독**까지 하는 태블릿용 웹 대시보드입니다.
+
+## 흐름
+
+1. **로그인** — 아이 이름 선택(박준선 / 박준혁). 처음이면 생년월일·학교·학년/반·비밀번호(숫자 4자리)를 등록합니다. 이후엔 비밀번호만 누르면 됩니다.
+2. **오늘의 Homework** — 숙제를 적습니다. 지난 HTF 에서 못 끝낸 숙제는 `🔁 이어하기` 표시와 함께 자동으로 들어 있습니다.
+3. **시계 · 준비 화면** — 아날로그/디지털 시계와 준비 멘트, 시간 설정(기본 40분, ±5분 또는 직접 입력). 시작을 누르면 `3·2·1·GO!` 뒤 타이머가 시작됩니다.
+4. **HTF 진행** — 줄어드는 링 타이머, 로켓 진행 바, 절반/10분/5분/1분 남음 알림, 마지막 10초 카운트.
+5. **클리어** — 셀카 카메라가 열립니다. 숙제(종이 등)가 보이거나 **2초가 지나면 3·2·1 뒤 자동 촬영**합니다. 결과물이 없으면 얼굴이나 V 포즈를 취하라는 안내가 나옵니다. 찍은 뒤 `다시 찍기 / 이 사진으로 클리어`를 고릅니다.
+6. **AI 판독** — 사진, 숙제 이름, 아이의 나이·학년/반을 Gemini 에 보내 `성의 있음 / 보통 / 성의 부족 / 확인 불가` 와 별점, 아이용 한마디, 부모님용 메모를 저장합니다.
+7. **종료** — 시간이 끝나거나 모두 클리어하면 결과 화면. 못 끝낸 숙제는 다음 HTF 로 이월됩니다.
+8. **마이페이지** — 정보·비밀번호·기본 시간 수정, 숙제 기록(사진·AI 결과) 보기.
+
+새로고침하거나 다시 로그인해도 진행 중인 HTF 는 서버 시각 기준으로 이어집니다.
+
+## 로컬 실행
+
+Node 22.9 이상이 필요합니다.
+
+```bash
+npm install
+npm run dev
+```
+
+`http://localhost:3000` 에서 열립니다. `DATABASE_URL` 이 없으면 로컬 임시 DB(PGlite, `./data`)를 씁니다. AI 판독을 켜려면 `.env.example` 을 `.env` 로 복사해 `GEMINI_API_KEY` 를 채우세요. 카메라는 `localhost` 또는 HTTPS 에서만 동작합니다.
+
+## Render 무료 플랜에 올리기
+
+Render 무료 웹 서비스는 **디스크가 임시**(재시작·재배포 때 사라짐)라서, 기록을 보관하려면 외부 Postgres 가 필요합니다.
+
+1. **무료 Postgres 만들기** — 추천은 [Neon](https://neon.tech) 입니다. 프로젝트를 만들고 Connection string(`postgresql://…?sslmode=require`)을 복사하세요. (Render 자체 무료 Postgres 는 생성 후 일정 기간이 지나면 만료되고, Supabase 무료는 일정 기간 접속이 없으면 일시중지될 수 있어 주말에만 쓰는 용도엔 Neon 이 편합니다. 무료 정책은 바뀔 수 있으니 가입 시 확인하세요. Supabase 를 쓴다면 Render 가 IPv4 라서 *직접 연결*이 아니라 **pooler 주소**를 써야 합니다.)
+2. **Gemini API 키** — [Google AI Studio](https://aistudio.google.com/apikey) 에서 발급합니다.
+3. **GitHub 에 올리기** — 이 폴더를 저장소로 push 합니다. (`.gitignore` 가 `node_modules`, `data`, `.env` 를 제외합니다.)
+4. **Render 에서** `New → Blueprint` 로 저장소를 고르면 `render.yaml` 대로 서비스가 만들어집니다. (직접 만들 땐 `Web Service`, Build `npm install --omit=optional`, Start `npm start`, Plan `Free`.)
+5. **환경변수 입력** — `DATABASE_URL`, `GEMINI_API_KEY`.
+6. 배포가 끝나면 주소(`https://….onrender.com`)를 태블릿에서 열고, **두 아이의 첫 등록을 바로 마치세요.** (등록 전 이름은 주소를 아는 누구나 선점할 수 있습니다.)
+
+### 환경변수
+
+| 이름 | 설명 |
+|---|---|
+| `DATABASE_URL` | Postgres 접속 주소 (운영 필수) |
+| `GEMINI_API_KEY` | 없으면 AI 판독 없이 사진만 저장 |
+| `GEMINI_MODEL` | 기본 `gemini-3.8-flash` |
+| `GEMINI_FALLBACK_MODELS` | 기본 모델이 404/429/장애일 때 차례로 시도 (기본 `gemini-3.5-flash-lite,gemini-2.5-flash`) |
+| `KIDS` | 로그인 화면 이름들 (기본 `박준선,박준혁`) |
+| `SESSION_SECRET` | 로그인 토큰 서명 키 (Blueprint 가 자동 생성) |
+
+### 주말에만 쓸 때 알아둘 점
+
+- 15분쯤 안 쓰면 서버가 잠들고, 다시 열면 **깨어나는 데 30초~1분** 걸립니다. 화면에 "깨우는 중" 안내가 나오고 자동으로 재시도합니다. HTF 시작 몇 분 전에 미리 열어 두면 편합니다.
+- 숙제 사진은 DB 에 압축(JPEG) 상태로 저장됩니다. 로그인한 본인만 볼 수 있습니다.
+- Gemini 로는 **사진, 숙제 이름, 나이, 학년/반**만 보냅니다 (이름·학교명·생년월일은 보내지 않음). 무료 등급은 입력 데이터가 Google 제품 개선에 쓰일 수 있으니 아이 사진이 걱정되면 유료 등급 키를 쓰세요.
+- AI 분석이 실패해도 클리어와 사진은 저장되고, 마이페이지 기록에서 `🔄 AI 다시 보기`로 다시 요청할 수 있습니다.
+
+## 구조
+
+```
+server/   index.js(API) · db.js(Postgres/PGlite) · auth.js(PIN·토큰) · ai.js(Gemini)
+public/   index.html · css/style.css · js/app.js(화면) camera.js(셀카·감지) sfx.js fx.js api.js
+render.yaml
+```
+
+### 물체 감지 튜닝
+
+`public/js/camera.js` 상단의 `CFG` 에서 조절합니다. 감지는 AI 가 아니라 가벼운 화면 비교입니다 — 처음 장면보다 **밝고 색이 옅은 영역(종이)이 화면의 8% 이상 새로 나타나거나**, 화면의 절반 이상이 확 바뀌면 "숙제가 보인다"고 판단합니다. 놓쳐도 2초 뒤에는 어차피 촬영하고, 촬영 후 `다시 찍기`가 있습니다. 오작동이 잦으면 `newPaperRatio` 를 올리세요.

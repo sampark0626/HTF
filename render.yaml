@@ -1,0 +1,23 @@
+# Render Blueprint — 무료(free) 웹 서비스 1개
+# DATABASE_URL, GEMINI_API_KEY 는 대시보드에서 직접 입력하세요 (sync: false).
+services:
+  - type: web
+    name: htf-dashboard
+    runtime: node
+    plan: free
+    region: singapore
+    # 로컬 개발용 PGlite 는 운영에서 쓰지 않으므로 설치를 건너뛴다.
+    buildCommand: npm install --omit=optional
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: DATABASE_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.8-flash
+      - key: SESSION_SECRET
+        generateValue: true
