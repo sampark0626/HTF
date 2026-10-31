@@ -6,6 +6,9 @@ const { open } = require('./db');
 const auth = require('./auth');
 const ai = require('./ai');
 const avatars = require('./avatar');
+const sessionTime = require('./session');
+const npcsLib = require('./npcs');
+const compression = require('compression');
 
 const PORT = process.env.PORT || 3000;
 const KIDS = (process.env.KIDS || '박준선,박준혁').split(',').map((s) => s.trim()).filter(Boolean);
@@ -14,6 +17,7 @@ const ADMIN_TTL_MS = 30 * 60 * 1000;
 const kidIndex = (name) => Math.max(0, KIDS.indexOf(name));
 const MAX_PHOTO_BYTES = 3 * 1024 * 1024;
 const MAX_PENDING = 30;
+const TOUR_MAX_STARS = 7; // public/js/world.js 의 마음 별 개수와 같아야 한다
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -41,6 +45,8 @@ const publicUser = (u) => ({
   className: u.class_name,
   timerMin: u.timer_min,
   avatar: avatars.parseAvatar(u.avatar, kidIndex(u.name)),
+  tourCount: u.tour_count || 0, // 마음 쉼터 보상: 다녀온 횟수와 모은 마음 별
+  tourStars: u.tour_stars || 0,
 });
 
 const publicItem = (h) => ({
@@ -60,12 +66,7 @@ const publicItem = (h) => ({
   byParent: h.added_by === 'parent',
 });
 
-const publicSession = (s) => (s ? {
-  id: s.id,
-  startedAt: s.started_at,
-  durationSec: s.duration_sec,
-  endsAt: s.started_at + s.duration_sec * 1000,
-} : null);
+const { publicSession } = sessionTime;
 
 async function main() {
   const db = await open();
@@ -79,6 +80,7 @@ async function main() {
 
   const app = express();
   app.disable('x-powered-by');
+  app.use(compression()); // three.js 같은 큰 스크립트를 가볍게 (사진 같은 이미지는 압축 대상이 아니다)
   app.use(express.json({ limit: '6mb' }));
   app.use((req, res, next) => {
     req.body ??= {}; // Express 5: 본문이 없으면 undefined
@@ -227,12 +229,27 @@ async function main() {
     );
   }
 
+  // 멈춘 채로 쉬는 시간을 다 쓴 세션은 자동으로 다시 흐르게 해서 돌려준다
   async function openSession(userId) {
     const [s] = await db.query(
       'SELECT * FROM sessions WHERE user_id = $1 AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1',
       [userId]
     );
-    return s || null;
+    if (!s) return null;
+    if (!sessionTime.needsAutoResume(s, Date.now())) return s;
+    await db.query(
+      'UPDATE sessions SET paused_total = $1, paused_at = NULL WHERE id = $2 AND paused_at IS NOT NULL',
+      [sessionTime.MAX_PAUSE_MS, s.id]
+    );
+    const [fresh] = await db.query('SELECT * FROM sessions WHERE id = $1', [s.id]);
+    return fresh;
+  }
+
+  async function sessionReply(userId, sessionId, res) {
+    const [s] = await db.query('SELECT * FROM sessions WHERE id = $1', [sessionId]);
+    const items = await listItems(userId, sessionId);
+    const now = Date.now();
+    res.json({ now, session: publicSession(s, now), items: items.map(publicItem) });
   }
 
   async function listItems(userId, sessionId) {
@@ -246,12 +263,39 @@ async function main() {
 
   api.get('/htf', async (req, res) => {
     let session = await openSession(req.user.id);
-    if (session && session.started_at + session.duration_sec * 1000 <= Date.now()) {
+    if (session && sessionTime.expired(session, Date.now())) {
       await endSession(req.user.id, session.id);
       session = null;
     }
     const items = await listItems(req.user.id, session && session.id);
-    res.json({ now: Date.now(), session: publicSession(session), items: items.map(publicItem) });
+    const now = Date.now();
+    res.json({ now, session: publicSession(session, now), items: items.map(publicItem) });
+  });
+
+  // 잠깐 멈춤 (화장실 등): 타이머가 멈추고, 한 번의 HTF 에서 합쳐 MAX_PAUSE_MIN 분까지 쓸 수 있다
+  api.post('/htf/pause', async (req, res) => {
+    const now = Date.now();
+    const s = await openSession(req.user.id);
+    if (!s || sessionTime.expired(s, now)) throw new HttpError(409, '진행 중인 HTF 가 없어요');
+    if (!s.paused_at) {
+      if (sessionTime.pauseLeftMs(s, now) <= 0) throw new HttpError(400, '쉬는 시간을 모두 썼어요');
+      await db.query('UPDATE sessions SET paused_at = $1 WHERE id = $2 AND paused_at IS NULL', [now, s.id]);
+    }
+    await sessionReply(req.user.id, s.id, res);
+  });
+
+  api.post('/htf/resume', async (req, res) => {
+    const now = Date.now();
+    const s = await openSession(req.user.id);
+    if (!s) throw new HttpError(409, '진행 중인 HTF 가 없어요');
+    if (s.paused_at) {
+      await db.query(
+        `UPDATE sessions SET paused_total = paused_total + LEAST($1 - paused_at, $2 - paused_total), paused_at = NULL
+         WHERE id = $3 AND paused_at IS NOT NULL`,
+        [now, sessionTime.MAX_PAUSE_MS, s.id]
+      );
+    }
+    await sessionReply(req.user.id, s.id, res);
   });
 
   api.post('/htf/start', async (req, res) => {
@@ -432,6 +476,56 @@ async function main() {
     res.json({ items: rows.map(publicItem) });
   });
 
+  // ───────── 마음 쉼터 교실의 친구·선생님 (아이마다 따로, 부모님이 만들고 고친다) ─────────
+  const publicNpc = (n) => ({ id: n.id, role: n.role, name: n.name, msg: n.msg, look: JSON.parse(n.look) });
+
+  async function insertDefaultNpcs(kidName) {
+    let order = 0;
+    for (const n of npcsLib.defaultNpcs(kidName)) {
+      // eslint-disable-next-line no-await-in-loop
+      await db.query(
+        'INSERT INTO npcs (id, kid_name, role, name, look, msg, sort_order, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+        [uid(), kidName, n.role, n.name, JSON.stringify(n.look), n.msg, order, Date.now()]
+      );
+      order += 1;
+    }
+  }
+
+  // 처음 한 번만 기본 구성원을 채운다 (부모님이 모두 지운 뒤에 다시 채워지지는 않는다)
+  async function listNpcs(kidName) {
+    const claimed = await db.query(
+      "INSERT INTO meta (key, value) VALUES ($1, '1') ON CONFLICT (key) DO NOTHING RETURNING key",
+      [`npcs_seeded:${kidName}`]
+    );
+    if (claimed.length) await insertDefaultNpcs(kidName);
+    const rows = await db.query('SELECT * FROM npcs WHERE kid_name = $1 ORDER BY sort_order ASC, created_at ASC', [kidName]);
+    return rows.map(publicNpc);
+  }
+
+  function npcFromBody(body) {
+    const name = str(body.name, 24);
+    if (!name) throw new HttpError(400, '이름을 적어 주세요');
+    if (!npcsLib.ROLES.includes(body.role)) throw new HttpError(400, '친구인지 선생님인지 골라 주세요');
+    const look = npcsLib.sanitizeLook(body.look);
+    if (!look) throw new HttpError(400, '모습을 다시 골라 주세요');
+    return { name, role: body.role, look, msg: str(body.msg, 80) };
+  }
+
+  api.get('/classroom', async (req, res) => {
+    res.json({ npcs: await listNpcs(req.user.name) });
+  });
+
+  // 숙제를 모두 클리어한 보상 "마음 쉼터" 3D 투어를 마쳤을 때: 마음 별(0~7)을 모은다
+  api.post('/tour/complete', async (req, res) => {
+    const stars = Math.min(TOUR_MAX_STARS, Math.max(0, Math.round(Number(req.body.stars)) || 0));
+    await db.query(
+      'UPDATE users SET tour_count = tour_count + 1, tour_stars = tour_stars + $1, updated_at = $2 WHERE id = $3',
+      [stars, Date.now(), req.user.id]
+    );
+    const [fresh] = await db.query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+    res.json({ user: publicUser(fresh), gained: stars });
+  });
+
   api.get('/photos/:id', async (req, res) => {
     const [p] = await db.query('SELECT mime, data FROM photos WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
     if (!p) throw new HttpError(404, '사진을 찾을 수 없어요');
@@ -513,6 +607,7 @@ async function main() {
   admin.post('/kids/:name/clear-records', async (req, res) => {
     const u = await kidFromParam(req);
     await wipeRecords(u.id);
+    await db.query('UPDATE users SET tour_count = 0, tour_stars = 0 WHERE id = $1', [u.id]); // 마음 별도 처음부터
     res.json({ ok: true });
   });
 
@@ -566,6 +661,57 @@ async function main() {
     res.json({ ok: true });
   });
 
+  // ── 교실의 친구·선생님 만들기/고치기 (아직 등록 전인 아이의 교실도 미리 꾸밀 수 있다) ──
+  const kidNameFromParam = (req) => {
+    if (!KIDS.includes(req.params.name)) throw new HttpError(404, '없는 친구예요');
+    return req.params.name;
+  };
+
+  admin.get('/kids/:name/classroom', async (req, res) => {
+    res.json({ npcs: await listNpcs(kidNameFromParam(req)) });
+  });
+
+  admin.post('/kids/:name/classroom', async (req, res) => {
+    const kid = kidNameFromParam(req);
+    const current = await listNpcs(kid);
+    if (current.length >= npcsLib.MAX_NPCS) throw new HttpError(400, `교실에는 ${npcsLib.MAX_NPCS}명까지만 둘 수 있어요`);
+    const n = npcFromBody(req.body);
+    const id = uid();
+    await db.query(
+      'INSERT INTO npcs (id, kid_name, role, name, look, msg, sort_order, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+      [id, kid, n.role, n.name, JSON.stringify(n.look), n.msg, current.length, Date.now()]
+    );
+    const [row] = await db.query('SELECT * FROM npcs WHERE id = $1', [id]);
+    res.json({ npc: publicNpc(row) });
+  });
+
+  // 기본 친구·선생님으로 되돌린다 (이 아이의 교실만)
+  admin.post('/kids/:name/classroom/reset', async (req, res) => {
+    const kid = kidNameFromParam(req);
+    await db.query('DELETE FROM npcs WHERE kid_name = $1', [kid]);
+    await db.query("INSERT INTO meta (key, value) VALUES ($1, '1') ON CONFLICT (key) DO NOTHING", [`npcs_seeded:${kid}`]);
+    await insertDefaultNpcs(kid);
+    res.json({ npcs: await listNpcs(kid) });
+  });
+
+  admin.patch('/kids/:name/classroom/:id', async (req, res) => {
+    const kid = kidNameFromParam(req);
+    const n = npcFromBody(req.body);
+    const done = await db.query(
+      'UPDATE npcs SET role = $1, name = $2, look = $3, msg = $4 WHERE id = $5 AND kid_name = $6 RETURNING *',
+      [n.role, n.name, JSON.stringify(n.look), n.msg, req.params.id, kid]
+    );
+    if (!done.length) throw new HttpError(404, '찾을 수 없어요');
+    res.json({ npc: publicNpc(done[0]) });
+  });
+
+  admin.delete('/kids/:name/classroom/:id', async (req, res) => {
+    const kid = kidNameFromParam(req);
+    const done = await db.query('DELETE FROM npcs WHERE id = $1 AND kid_name = $2 RETURNING id', [req.params.id, kid]);
+    if (!done.length) throw new HttpError(404, '찾을 수 없어요');
+    res.json({ ok: true });
+  });
+
   // 부모님은 두 아이의 숙제 사진을 볼 수 있다 (사진 번호는 추측할 수 없는 무작위 값)
   admin.get('/photos/:id', async (req, res) => {
     const [p] = await db.query('SELECT mime, data FROM photos WHERE id = $1', [req.params.id]);
@@ -579,6 +725,8 @@ async function main() {
   app.use('/api', api);
   app.use('/api', (req, res) => res.status(404).json({ error: '없는 주소예요' }));
 
+  // 3D 쉼터용 three.js 는 npm 패키지를 그대로 내려 준다 (CDN 없이, 버전은 package.json 이 정한다)
+  app.use('/vendor/three', express.static(path.join(__dirname, '..', 'node_modules', 'three', 'build'), { maxAge: '7d' }));
   app.use(express.static(path.join(__dirname, '..', 'public'), { extensions: ['html'] }));
 
   // eslint-disable-next-line no-unused-vars
@@ -589,7 +737,14 @@ async function main() {
     res.status(500).json({ error: '서버에 문제가 생겼어요. 잠시 뒤에 다시 해 주세요' });
   });
 
-  const server = app.listen(PORT, () => console.log(`HTF 대시보드가 http://localhost:${PORT} 에서 실행 중이에요`));
+  // Express 5 는 포트를 못 열어도(이미 사용 중 등) 콜백을 부르고 오류를 첫 인자로 넘긴다
+  const server = app.listen(PORT, (err) => {
+    if (err) {
+      console.error(`포트 ${PORT} 를 열지 못했어요:`, err.message);
+      process.exit(1);
+    }
+    console.log(`HTF 대시보드가 http://localhost:${PORT} 에서 실행 중이에요`);
+  });
   const shutdown = () => server.close(() => db.close().finally(() => process.exit(0)));
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);

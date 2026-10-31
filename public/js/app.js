@@ -32,6 +32,7 @@ const state = {
   timeUp: false,
   clearing: false,
   finishing: false,
+  tourReward: null,
 };
 
 // 로그인한 친구는 내 캐릭터, 그 밖에는 서버가 알려 준 캐릭터(없으면 기본)
@@ -710,7 +711,11 @@ function screenRun() {
           <div class="track-line"><div class="track-fill" id="fill"></div></div>
           <div class="rocket" id="rocket">🚀</div><div class="flag">🏁</div>
         </div>
-        <p class="endtime">⏰ ${fmtClock(s.endsAt)} 에 끝나요</p>
+        <p class="endtime" id="endtime"></p>
+        <div class="pause-row">
+          <button class="btn btn-white small" id="pause">⏸️ 잠깐 멈춤</button>
+          <small id="pause-left"></small>
+        </div>
       </div>
       <div class="run-right">
         <div class="run-head"><h2>오늘의 Homework</h2><span class="pill" id="prog"></span></div>
@@ -771,43 +776,148 @@ function screenRun() {
     { at: 60, text: '1분 남았어요!! ⚡', kind: 'hot', min: 180 },
   ].filter((m) => !m.min || totalSec > m.min);
   const fired = new Set();
-  const remainNow = () => Math.max(0, Math.ceil((s.endsAt - (Date.now() + state.offset)) / 1000));
-  marks.forEach((m, i) => { if (remainNow() <= m.at) fired.add(i); });
+  // 남은 시간: 멈춘 동안에는 서버가 알려 준 고정값, 흐르는 동안에는 종료 시각까지
+  const remainMsNow = () => (s.pausedAt ? s.remainingMs : Math.max(0, s.endsAt - (Date.now() + state.offset)));
+  marks.forEach((m, i) => { if (Math.ceil(remainMsNow() / 1000) <= m.at) fired.add(i); });
 
   let lastSec = -1;
   function tick() {
-    const remainMs = Math.max(0, s.endsAt - (Date.now() + state.offset));
+    const paused = Boolean(s.pausedAt);
+    const remainMs = remainMsNow();
     const sec = Math.ceil(remainMs / 1000);
     const ratio = remainMs / total;
     fg.setAttribute('stroke-dashoffset', (C * (1 - ratio)).toFixed(2));
     const p = clamp(1 - ratio, 0, 1);
     fill.style.width = `${p * 100}%`;
     rocket.style.left = `calc(${p} * (100% - 34px))`;
+    ring.classList.toggle('paused', paused);
     if (sec !== lastSec) {
       lastSec = sec;
       timeEl.textContent = fmtMMSS(sec);
       const left = sec / s.durationSec;
       ring.classList.toggle('warn', left <= 0.33 && left > 0.1);
       ring.classList.toggle('hot', left <= 0.1);
-      const last10 = sec <= 10 && sec > 0;
+      const last10 = sec <= 10 && sec > 0 && !paused;
       ring.classList.toggle('last10', last10);
       if (last10) { sfx.tick(); timeEl.style.animation = 'none'; void timeEl.offsetWidth; timeEl.style.animation = ''; }
-      marks.forEach((m, i) => {
-        if (!fired.has(i) && sec <= m.at && sec > 0) {
-          fired.add(i);
-          banner(m.text, m.kind);
-          if (m.kind) sfx.warn(); else sfx.pop();
-        }
-      });
+      if (!paused) {
+        marks.forEach((m, i) => {
+          if (!fired.has(i) && sec <= m.at && sec > 0) {
+            fired.add(i);
+            banner(m.text, m.kind);
+            if (m.kind) sfx.warn(); else sfx.pop();
+          }
+        });
+      }
     }
-    if (remainMs <= 0) {
+    if (remainMs <= 0 && !paused) {
       clearInterval(iv);
       onTimeUp();
     }
   }
   const iv = setInterval(tick, 200);
   onLeave(() => clearInterval(iv));
+
+  // ── 잠깐 멈춤 (화장실·물 마시기 등): 타이머가 멈추고, 한 번의 HTF 에서 합쳐 정해진 시간까지만 쓴다 ──
+  const pauseBtn = $('#pause', el);
+  const pauseLeftEl = $('#pause-left', el);
+  const endEl = $('#endtime', el);
+  let pauseBase = { left: s.pauseLeftMs ?? 0, at: Date.now() };
+  const pauseLeftNow = () => Math.max(0, pauseBase.left - (s.pausedAt ? Date.now() - pauseBase.at : 0));
+  let pauseOv = null;
+  let pauseIv = null;
+  let resuming = false;
+
+  function refreshPauseUi() {
+    const left = pauseLeftNow();
+    pauseBtn.disabled = Boolean(s.pausedAt) || left <= 0;
+    pauseLeftEl.textContent = left > 0 ? `쉬는 시간 ${fmtMMSS(Math.ceil(left / 1000))} 남음` : '쉬는 시간을 다 썼어요';
+    endEl.textContent = s.endsAt ? `⏰ ${fmtClock(s.endsAt)} 에 끝나요` : '⏸️ 잠깐 멈춰 있어요';
+  }
+
+  function applySession(r) {
+    Object.assign(s, { endsAt: null, pausedAt: null, remainingMs: null }, r.session);
+    state.offset = r.now - Date.now();
+    pauseBase = { left: r.session.pauseLeftMs, at: Date.now() };
+    refreshPauseUi();
+    tick();
+  }
+
+  function hidePauseOverlay() {
+    clearInterval(pauseIv);
+    if (pauseOv) pauseOv.remove();
+    pauseOv = null;
+  }
+  onLeave(hidePauseOverlay);
+
+  function showPauseOverlay() {
+    hidePauseOverlay();
+    const [emoji, msg] = [
+      ['🚽', '다녀와요! 급할 땐 참지 말고요'],
+      ['💧', '물 한 모금 마시고 와요'],
+      ['🧘', '기지개 쭉~ 쉬었다 와요'],
+      ['🙋', '도움이 필요하면 어른께 말해요'],
+    ][Math.floor(Math.random() * 4)];
+    pauseOv = document.createElement('div');
+    pauseOv.className = 'overlay pause-ov';
+    pauseOv.innerHTML = `
+      <div class="card ovl-card pause-card" role="dialog" aria-modal="true" aria-label="잠깐 멈춤">
+        <div class="pause-emoji">${emoji}</div>
+        <h2>잠깐 멈췄어요</h2>
+        <p>${esc(msg)}</p>
+        <div class="pause-stats">
+          <div>HTF 남은 시간<b id="p-remain"></b></div>
+          <div>쉬는 시간 남음<b id="p-left"></b></div>
+        </div>
+        <button class="btn btn-mint big" id="resume">▶️ 다시 시작</button>
+      </div>`;
+    document.body.appendChild(pauseOv);
+    pauseOv.addEventListener('click', (e) => {
+      if (e.target.closest('#resume')) { sfx.tap(); doResume(); }
+    });
+    resuming = false;
+    const update = () => {
+      $('#p-remain', pauseOv).textContent = fmtMMSS(Math.ceil((s.remainingMs ?? 0) / 1000));
+      const left = pauseLeftNow();
+      $('#p-left', pauseOv).textContent = fmtMMSS(Math.ceil(left / 1000));
+      if (left <= 0) doResume(); // 쉬는 시간을 다 쓰면 서버도 같은 때 자동으로 다시 흐르게 한다
+    };
+    update();
+    pauseIv = setInterval(update, 250);
+  }
+
+  async function doPause() {
+    if (s.pausedAt || state.clearing || state.finishing || state.timeUp || pauseBtn.disabled) return;
+    try {
+      applySession(await api.pauseHtf());
+      showPauseOverlay();
+      sfx.pop();
+    } catch (err) {
+      toast(err.message, 'err');
+      sfx.error();
+      if (err.status === 409) finishHtf('timeup');
+    }
+  }
+
+  async function doResume() {
+    if (resuming) return;
+    resuming = true;
+    try {
+      applySession(await api.resumeHtf());
+      hidePauseOverlay();
+      sfx.go();
+      banner('▶️ 다시 시작! 힘내요 💪');
+    } catch (err) {
+      resuming = false;
+      toast(err.message, 'err');
+      sfx.error();
+      if (err.status === 409) { hidePauseOverlay(); finishHtf('timeup'); }
+    }
+  }
+
+  refreshPauseUi();
   tick();
+  if (s.pausedAt) showPauseOverlay(); // 멈춘 채로 새로고침/다시 로그인한 경우
 
   async function onTimeUp() {
     state.timeUp = true;
@@ -864,6 +974,7 @@ function screenRun() {
   }
 
   el.addEventListener('click', async (e) => {
+    if (e.target.closest('#pause')) { sfx.unlock(); doPause(); return; }
     const clearBtn = e.target.closest('[data-clear]');
     if (clearBtn) { onClear(clearBtn.dataset.clear, clearBtn); return; }
     if (e.target.closest('#quit')) {
@@ -940,20 +1051,47 @@ async function finishHtf(reason) {
     summary = { cleared: done, remaining: state.items.filter((i) => i.status === 'pending') };
   }
   state.session = null;
+  state.tourReward = null; // 이번 HTF 의 마음 쉼터 보상 (한 번만 저장)
   screenFinish(reason, summary);
 }
 
-function screenFinish(reason, { cleared, remaining }) {
+// 마음 쉼터(3D 교실 투어): 필요할 때만 불러온다. 끝나면 onClose({ stars, seconds, skipped })
+async function openTour({ user, preview = false, npcs = [], onClose }) {
+  try {
+    const { startWorld } = await import('./world.js');
+    await startWorld({ user, preview, npcs, onDone: onClose });
+  } catch (err) {
+    console.warn('[tour]', err);
+    toast('쉼터를 열지 못했어요. 잠시 뒤에 다시 해 봐요', 'err');
+    onClose({ stars: 0, seconds: 0, skipped: true });
+  }
+}
+
+function screenFinish(reason, summary, { returning = false } = {}) {
+  const { cleared, remaining } = summary;
   setTopbar('full');
   const cfg = {
     allclear: { emoji: '🏆', title: '올 클리어!!', sub: '오늘 숙제를 모두 끝냈어요. 정말 대단해요!' },
     timeup: { emoji: '⏰', title: '시간 종료!', sub: 'HTF 시간이 끝났어요. 정말 수고했어요!' },
     quit: { emoji: '👋', title: '수고했어요!', sub: '오늘은 여기까지 해요.' },
   }[reason];
+  const rw = state.tourReward;
+  // 숙제를 모두 클리어하면 보상: 귀여운 교실을 걸으며 5분 쉬는 3D 마음 쉼터
+  const reward = reason !== 'allclear' ? '' : `
+    <div class="reward-card">
+      <div class="gift">${rw ? '🌈' : '🎁'}</div>
+      <h3>${rw ? '마음 쉼터에 다녀왔어요!' : '올 클리어 선물이 있어요!'}</h3>
+      <p>${rw
+    ? `마음 별 <b>+${rw.gained}</b> · 지금까지 <span class="mind-stars">⭐ ${state.user.tourStars || 0}개</span>`
+    : '귀여운 교실을 걸으며 5분 동안<br>눈과 마음을 쉬어 봐요'}</p>
+      <button class="btn btn-yellow big tour-btn" id="tour">${rw ? '🌈 한 번 더 둘러보기' : '🌈 마음 쉼터 입장'}</button>
+      ${rw ? '<small>별은 한 번만 저장돼요</small>' : '<small>눈을 쉬는 시간이에요 👀</small>'}
+    </div>`;
   const el = mount(`
     <div class="trophy">${cfg.emoji}</div>
     <h2>${cfg.title}</h2>
     <p class="sub">${cfg.sub}</p>
+    ${reward}
     <div class="count-pills">
       <div class="count-pill">🎯 클리어<b>${cleared}</b>개</div>
       <div class="count-pill">📌 남은 숙제<b>${remaining.length}</b>개</div>
@@ -968,9 +1106,36 @@ function screenFinish(reason, { cleared, remaining }) {
       <button class="btn btn-white" id="mypage">📒 내 기록 보기</button>
       <button class="btn btn-white" id="bye">🚪 끝내기</button>
     </div>`, `center finish ${reason}`);
-  if (reason === 'allclear') { celebrate(['🏆', '⭐', '🎉', '✨']); sfx.success(); }
-  else if (reason === 'timeup') { confetti({ count: cleared ? 120 : 40, y: 0.6, emojis: ['⭐'] }); }
-  else if (cleared) { confetti({ count: 60, y: 0.6 }); }
+  if (!returning) {
+    if (reason === 'allclear') { celebrate(['🏆', '⭐', '🎉', '✨']); sfx.success(); }
+    else if (reason === 'timeup') { confetti({ count: cleared ? 120 : 40, y: 0.6, emojis: ['⭐'] }); }
+    else if (cleared) { confetti({ count: 60, y: 0.6 }); }
+  }
+  const tourBtn = $('#tour', el);
+  if (tourBtn) {
+    tourBtn.onclick = async () => {
+      sfx.unlock();
+      sfx.pop();
+      tourBtn.disabled = true;
+      // 이 아이의 교실에 있는 선생님과 친구들 (못 불러와도 교실은 열린다)
+      const npcs = await api.classroom().then((r) => r.npcs).catch(() => []);
+      await openTour({
+        user: state.user,
+        npcs,
+        onClose: async (res) => {
+          if (!res.skipped && !state.tourReward) {
+            state.tourReward = { gained: res.stars };
+            try {
+              Object.assign(state.user, (await api.tourComplete(res.stars, res.seconds)).user);
+            } catch (err) {
+              toast(err.message, 'err');
+            }
+          }
+          screenFinish(reason, summary, { returning: true });
+        },
+      });
+    };
+  }
   $('#again', el).onclick = () => { sfx.pop(); goHome(); };
   $('#mypage', el).onclick = () => { sfx.tap(); screenMyPage(); };
   $('#bye', el).onclick = () => { sfx.tap(); screenLogin(); };
@@ -1032,6 +1197,7 @@ function screenMyPage() {
   function paneInfo() {
     pane.innerHTML = `
       <form class="card form-card" id="form" autocomplete="off" novalidate style="width:100%">
+        <div style="text-align:center"><span class="mind-stars">🌈 마음 쉼터 ${u.tourCount || 0}번 다녀옴 · ⭐ 마음 별 ${u.tourStars || 0}개</span></div>
         <div class="field"><label for="nm">🙋 이름</label><input id="nm" value="${esc(u.name)}" disabled></div>
         ${birthFields(u.birth)}
         <div class="field"><label for="school">🏫 학교</label><input id="school" maxlength="40" value="${esc(u.school)}"></div>
@@ -1176,7 +1342,7 @@ function screenParentLogin() {
 const PARENT_ACTIONS = {
   'clear-records': {
     title: '숙제 기록을 모두 지울까요? 🧹',
-    text: '숙제·사진·AI 판독 기록이 사라져요. 프로필과 캐릭터, 비밀번호는 그대로예요.',
+    text: '숙제·사진·AI 판독 기록과 마음 별이 사라져요. 프로필과 캐릭터, 비밀번호는 그대로예요.',
     done: '기록을 지웠어요',
   },
   'reset-pin': {
@@ -1212,13 +1378,14 @@ async function screenParent() {
     : '아직 등록 전이에요'}</p>
         </div>
       </div>
-      ${k.registered ? `
-        <div class="pc-actions">
-          <button class="btn btn-blue small" data-act="homework">📝 숙제 보기·편집</button>
+      <div class="pc-actions">
+        ${k.registered ? '<button class="btn btn-blue small" data-act="homework">📝 숙제 보기·편집</button>' : ''}
+        <button class="btn btn-yellow small" data-act="classroom">🏫 교실 친구·선생님</button>
+        ${k.registered ? `
           <button class="btn btn-white small" data-act="clear-records">🧹 기록만 지우기</button>
           <button class="btn btn-white small" data-act="reset-pin">🔑 비밀번호 다시 정하기</button>
-          <button class="btn btn-coral small" data-act="reset-all">🔄 처음부터 다시</button>
-        </div>` : ''}
+          <button class="btn btn-coral small" data-act="reset-all">🔄 처음부터 다시</button>` : ''}
+      </div>
     </div>`;
   const el = mount(`
     <div class="my">
@@ -1234,6 +1401,7 @@ async function screenParent() {
     sfx.tap();
     const name = btn.closest('.parent-card').dataset.name;
     if (btn.dataset.act === 'homework') { screenParentHomework(name); return; }
+    if (btn.dataset.act === 'classroom') { screenParentClassroom(name); return; }
     const a = PARENT_ACTIONS[btn.dataset.act];
     if (!(await confirmDialog({ title: `${name}: ${a.title}`, text: a.text, yes: '네, 할게요', no: '아니요' }))) return;
     btn.disabled = true;
@@ -1475,6 +1643,109 @@ async function screenParentHomework(name) {
       } catch (err) {
         li.classList.remove('out');
         fail(err);
+      }
+    }
+  });
+}
+
+// 부모님이 한 아이의 마음 쉼터 교실을 꾸민다: 선생님·친구를 만들고, 고치고, 지우고, 미리 본다
+async function screenParentClassroom(name) {
+  setTopbar('none');
+  let npcs;
+  try {
+    ({ npcs } = await api.adminClassroom(name));
+  } catch (err) {
+    toast(err.message, 'err');
+    if (err.status === 401) screenParentLogin(); else screenParent();
+    return;
+  }
+  const card = (n) => `
+    <div class="card npc-card" data-id="${n.id}">
+      <div class="npc-chips" aria-hidden="true"><i style="--c:${n.look.hair}"></i><i style="--c:${n.look.top}"></i><i style="--c:${n.look.bottom}"></i></div>
+      <div class="npc-info">
+        <b>${esc(n.name)}</b>
+        <span class="chipv ${n.role === 'teacher' ? 'okay' : ''}">${n.role === 'teacher' ? '🧑‍🏫 선생님' : '🧒 친구'}</span>
+        <p>${n.msg ? esc(n.msg) : '(한마디 없음)'}</p>
+      </div>
+      <div class="npc-btns">
+        <button class="btn btn-white small" data-edit="${n.id}">✏️ 고치기</button>
+        <button class="icon-btn" data-del="${n.id}" aria-label="${esc(n.name)} 지우기">🗑️</button>
+      </div>
+    </div>`;
+  const section = (title, list) => `<div class="rec-day">${title} (${list.length})</div>${list.length ? list.map(card).join('') : '<p class="empty">아직 없어요</p>'}`;
+  const el = mount(`
+    <div class="my">
+      <button class="back-link" id="back">← 부모님 메뉴</button>
+      <h2 style="font-size:1.9rem">🏫 ${esc(name)}의 교실</h2>
+      <p class="sub">숙제를 모두 끝낸 ${esc(name)}이(가) 들어가는 마음 쉼터에 나오는 선생님과 친구들이에요. 만들고 고치면 바로 반영되고, 모두 교실을 돌아다녀요. (최대 12명)</p>
+      <div class="pc-actions">
+        <button class="btn btn-yellow small" data-new="teacher">➕ 선생님 만들기</button>
+        <button class="btn btn-blue small" data-new="friend">➕ 친구 만들기</button>
+        <button class="btn btn-mint small" id="preview">🌈 이 교실 미리 보기</button>
+        <button class="btn btn-white small" id="reset">↩️ 기본으로 되돌리기</button>
+      </div>
+      ${section('🧑‍🏫 선생님', npcs.filter((n) => n.role === 'teacher'))}
+      ${section('🧒 친구들', npcs.filter((n) => n.role === 'friend'))}
+    </div>`);
+
+  const edit = async (initial, onSave) => {
+    const { openNpcEditor } = await import('./classroom.js');
+    if (await openNpcEditor({ initial, kidName: name, onSave })) screenParentClassroom(name);
+  };
+
+  $('#back', el).onclick = () => { sfx.tap(); screenParent(); };
+  $('#preview', el).onclick = async () => {
+    sfx.unlock();
+    sfx.pop();
+    const avatar = (state.config.kids.find((k) => k.name === name) || {}).avatar || { animal: 0, color: 0, acc: 0 };
+    // 이 아이가 보게 될 모습 그대로 둘러본다 (별은 저장되지 않는다)
+    openTour({ user: { name, avatar }, preview: true, npcs, onClose: () => screenParentClassroom(name) });
+  };
+  $('#reset', el).onclick = async () => {
+    sfx.tap();
+    if (!(await confirmDialog({
+      title: `${name}의 교실을 기본으로 되돌릴까요? ↩️`,
+      text: '만들거나 고친 선생님·친구가 모두 사라지고 처음 모습으로 돌아가요.',
+      yes: '되돌릴래요',
+      no: '아니요',
+    }))) return;
+    try {
+      await api.adminResetClassroom(name);
+      sfx.success();
+      toast('기본 교실로 되돌렸어요 ✅');
+      screenParentClassroom(name);
+    } catch (err) {
+      toast(err.message, 'err');
+      sfx.error();
+    }
+  };
+  el.addEventListener('click', async (e) => {
+    const created = e.target.closest('[data-new]');
+    if (created) {
+      sfx.tap();
+      const { newNpc } = await import('./classroom.js');
+      edit(newNpc(created.dataset.new), (d) => api.adminAddNpc(name, d));
+      return;
+    }
+    const editBtn = e.target.closest('[data-edit]');
+    if (editBtn) {
+      sfx.tap();
+      const npc = npcs.find((n) => n.id === editBtn.dataset.edit);
+      if (npc) edit(npc, (d) => api.adminEditNpc(name, npc.id, d));
+      return;
+    }
+    const del = e.target.closest('[data-del]');
+    if (del) {
+      sfx.tap();
+      const npc = npcs.find((n) => n.id === del.dataset.del);
+      if (!npc || !(await confirmDialog({ title: `${npc.name}을(를) 교실에서 뺄까요? 🗑️`, yes: '뺄래요', no: '아니요' }))) return;
+      try {
+        await api.adminDeleteNpc(name, npc.id);
+        sfx.success();
+        screenParentClassroom(name);
+      } catch (err) {
+        toast(err.message, 'err');
+        sfx.error();
       }
     }
   });
