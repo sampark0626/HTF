@@ -8,6 +8,8 @@ const ai = require('./ai');
 const avatars = require('./avatar');
 const sessionTime = require('./session');
 const npcsLib = require('./npcs');
+const { roomFor } = require('./rooms');
+const presence = require('./presence');
 const compression = require('compression');
 
 const PORT = process.env.PORT || 3000;
@@ -93,7 +95,7 @@ async function main() {
   app.get('/healthz', (req, res) => res.json({ ok: true }));
 
   app.get('/api/config', async (req, res) => {
-    const rows = await db.query('SELECT name, avatar, pin_hash FROM users');
+    const rows = await db.query('SELECT name, avatar, pin_hash, class_name FROM users');
     const byName = new Map(rows.map((r) => [r.name, r]));
     res.json({
       kids: KIDS.map((name, i) => {
@@ -103,6 +105,7 @@ async function main() {
           registered: Boolean(u),
           needsPin: Boolean(u) && !u.pin_hash, // 부모님이 비밀번호를 초기화한 상태
           avatar: u ? avatars.parseAvatar(u.avatar, i) : avatars.defaultAvatar(i),
+          room: roomFor(name, u && u.class_name),
         };
       }),
       persistent: db.persistent,
@@ -512,7 +515,16 @@ async function main() {
   }
 
   api.get('/classroom', async (req, res) => {
-    res.json({ npcs: await listNpcs(req.user.name) });
+    res.json({ npcs: await listNpcs(req.user.name), room: roomFor(req.user.name, req.user.class_name) });
+  });
+
+  // 교실에서 부모님과 같이 있기: 내 위치를 알리고 같은 교실의 다른 사람(엄마·아빠)을 받는다
+  api.post('/presence', (req, res) => {
+    res.json({ others: presence.sync(req.user.name, 'kid', 'kid', req.body) });
+  });
+  api.post('/presence/leave', (req, res) => {
+    presence.leave(req.user.name, 'kid');
+    res.json({ ok: true });
   });
 
   // 숙제를 모두 클리어한 보상 "마음 쉼터" 3D 투어를 마쳤을 때: 마음 별(0~7)을 모은다
@@ -563,7 +575,7 @@ async function main() {
       // eslint-disable-next-line no-await-in-loop
       const [u] = await db.query('SELECT * FROM users WHERE name = $1', [name]);
       if (!u) {
-        kids.push({ name, registered: false, avatar: avatars.defaultAvatar(kidIndex(name)) });
+        kids.push({ name, registered: false, avatar: avatars.defaultAvatar(kidIndex(name)), room: roomFor(name) });
         continue; // eslint-disable-line no-continue
       }
       // eslint-disable-next-line no-await-in-loop
@@ -582,6 +594,7 @@ async function main() {
         avatar: avatars.parseAvatar(u.avatar, kidIndex(name)),
         school: u.school,
         className: u.class_name,
+        room: roomFor(name, u.class_name),
         done: Number(c.done),
         pending: Number(c.pending),
         photos: Number(p.n),
@@ -668,7 +681,29 @@ async function main() {
   };
 
   admin.get('/kids/:name/classroom', async (req, res) => {
-    res.json({ npcs: await listNpcs(kidNameFromParam(req)) });
+    const kid = kidNameFromParam(req);
+    const [u] = await db.query('SELECT class_name FROM users WHERE name = $1', [kid]);
+    res.json({ npcs: await listNpcs(kid), room: roomFor(kid, u && u.class_name) });
+  });
+
+  // 엄마·아빠 캐릭터로 아이의 교실에 같이 들어간다. sid 는 이 화면이 만든 무작위 값(같은 사람의 위치를 이어 붙인다)
+  const presenceId = (body) => {
+    const sid = typeof body.sid === 'string' ? body.sid.replace(/[^\w-]/g, '').slice(0, 24) : '';
+    if (!sid) throw new HttpError(400, '화면 번호가 없어요');
+    if (body.role !== 'mom' && body.role !== 'dad') throw new HttpError(400, '엄마인지 아빠인지 골라 주세요');
+    return `p:${sid}`;
+  };
+  admin.get('/kids/:name/presence', (req, res) => {
+    res.json({ here: presence.list(kidNameFromParam(req), null).map((p) => ({ kind: p.kind })) });
+  });
+  admin.post('/kids/:name/presence', (req, res) => {
+    const kid = kidNameFromParam(req);
+    const id = presenceId(req.body);
+    res.json({ others: presence.sync(kid, id, req.body.role, req.body) });
+  });
+  admin.post('/kids/:name/presence/leave', (req, res) => {
+    presence.leave(kidNameFromParam(req), presenceId(req.body));
+    res.json({ ok: true });
   });
 
   admin.post('/kids/:name/classroom', async (req, res) => {

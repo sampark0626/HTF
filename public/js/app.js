@@ -1056,10 +1056,11 @@ async function finishHtf(reason) {
 }
 
 // 마음 쉼터(3D 교실 투어): 필요할 때만 불러온다. 끝나면 onClose({ stars, seconds, skipped })
-async function openTour({ user, preview = false, npcs = [], onClose }) {
+// room: 이 아이의 교실(문패·분위기), visit: 부모님이 엄마/아빠로 같이 들어올 때 { role }, presence: 같이 있는 사람과 위치를 주고받는 연결
+async function openTour({ user, preview = false, visit = null, room = null, npcs = [], presence = null, onClose }) {
   try {
     const { startWorld } = await import('./world.js');
-    await startWorld({ user, preview, npcs, onDone: onClose });
+    await startWorld({ user, preview, visit, room, npcs, presence, onDone: onClose });
   } catch (err) {
     console.warn('[tour]', err);
     toast('쉼터를 열지 못했어요. 잠시 뒤에 다시 해 봐요', 'err');
@@ -1117,11 +1118,14 @@ function screenFinish(reason, summary, { returning = false } = {}) {
       sfx.unlock();
       sfx.pop();
       tourBtn.disabled = true;
-      // 이 아이의 교실에 있는 선생님과 친구들 (못 불러와도 교실은 열린다)
-      const npcs = await api.classroom().then((r) => r.npcs).catch(() => []);
+      // 이 아이의 교실(문패·분위기)과 거기 있는 선생님·친구들 (못 불러와도 교실은 열린다)
+      const cls = await api.classroom().catch(() => ({ npcs: [], room: null }));
       await openTour({
         user: state.user,
-        npcs,
+        npcs: cls.npcs,
+        room: cls.room,
+        // 부모님이 같은 교실에 들어와 있으면 서로 볼 수 있다
+        presence: { sync: (me) => api.presence(me), leave: () => api.presenceLeave() },
         onClose: async (res) => {
           if (!res.skipped && !state.tourReward) {
             state.tourReward = { gained: res.stars };
@@ -1372,13 +1376,15 @@ async function screenParent() {
       <div class="pc-head">
         ${avatarHtml(k.avatar, { size: 'lg' })}
         <div>
-          <h3>${esc(k.name)}</h3>
+          <h3>${esc(k.name)}${k.room && k.room.who ? ` <span class="chipv">${esc(k.room.who)}</span>` : ''}</h3>
+          <p class="pc-room">🏫 ${esc(k.room ? k.room.label : '')}</p>
           <p>${k.registered
     ? `${esc(k.school)} ${esc(k.className)}<br>클리어 ${k.done}개 · 남은 숙제 ${k.pending}개 · 사진 ${k.photos}장${k.needsPin ? ' · 🔑 새 비밀번호 대기 중' : ''}`
     : '아직 등록 전이에요'}</p>
         </div>
       </div>
       <div class="pc-actions">
+        <button class="btn btn-mint small" data-act="visit">👪 교실에 같이 들어가기</button>
         ${k.registered ? '<button class="btn btn-blue small" data-act="homework">📝 숙제 보기·편집</button>' : ''}
         <button class="btn btn-yellow small" data-act="classroom">🏫 교실 친구·선생님</button>
         ${k.registered ? `
@@ -1402,6 +1408,7 @@ async function screenParent() {
     const name = btn.closest('.parent-card').dataset.name;
     if (btn.dataset.act === 'homework') { screenParentHomework(name); return; }
     if (btn.dataset.act === 'classroom') { screenParentClassroom(name); return; }
+    if (btn.dataset.act === 'visit') { enterClassroom(name, screenParent); return; }
     const a = PARENT_ACTIONS[btn.dataset.act];
     if (!(await confirmDialog({ title: `${name}: ${a.title}`, text: a.text, yes: '네, 할게요', no: '아니요' }))) return;
     btn.disabled = true;
@@ -1648,12 +1655,75 @@ async function screenParentHomework(name) {
   });
 }
 
+// 엄마·아빠 캐릭터로 아이의 교실에 같이 들어간다. 아이가 그때 쉼터에 있으면 서로 보인다.
+const ROLE_KEY = 'htf_parent_role';
+function chooseParentRole(name, room) {
+  return new Promise((resolve) => {
+    let last = 'mom';
+    try { last = localStorage.getItem(ROLE_KEY) === 'dad' ? 'dad' : 'mom'; } catch (_) { /* 무시 */ }
+    const ov = document.createElement('div');
+    ov.className = 'overlay';
+    ov.innerHTML = `
+      <div class="card ovl-card role-card" role="dialog" aria-modal="true">
+        <div class="avatar-row">${avatarHtml(avatarOf(name), { size: 'lg' })}</div>
+        <h3>${esc(name)}의 교실에 같이 들어가요</h3>
+        <p class="pc-room">🏫 ${esc(room ? room.label : '')}</p>
+        <p class="role-status" id="role-status">교실을 확인하는 중…</p>
+        <div class="role-btns">
+          <button class="btn btn-coral big${last === 'mom' ? ' pick' : ''}" data-role="mom">👩 엄마로 들어가기</button>
+          <button class="btn btn-blue big${last === 'dad' ? ' pick' : ''}" data-role="dad">👨 아빠로 들어가기</button>
+        </div>
+        <button class="back-link" data-role="">← 돌아가기</button>
+      </div>`;
+    document.body.appendChild(ov);
+    api.adminPeek(name).then((r) => {
+      const kidHere = r.here.some((p) => p.kind === 'kid');
+      const el = $('#role-status', ov);
+      if (el) el.textContent = kidHere ? `🎉 ${name}이(가) 지금 교실에 있어요! 같이 만나요` : `지금은 ${name}이(가) 교실에 없어요. 숙제를 모두 끝내면 들어와요 (먼저 둘러봐도 좋아요)`;
+    }).catch(() => { const el = $('#role-status', ov); if (el) el.textContent = ''; });
+    ov.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-role]');
+      if (!b) return;
+      sfx.tap();
+      ov.remove();
+      const role = b.dataset.role;
+      if (role) { try { localStorage.setItem(ROLE_KEY, role); } catch (_) { /* 무시 */ } }
+      resolve(role || null);
+    });
+  });
+}
+
+async function enterClassroom(name, back) {
+  sfx.unlock();
+  let cls;
+  try {
+    cls = await api.adminClassroom(name);
+  } catch (err) {
+    toast(err.message, 'err');
+    if (err.status === 401) screenParentLogin();
+    return;
+  }
+  const role = await chooseParentRole(name, cls.room);
+  if (!role) return;
+  sfx.pop();
+  const sid = Math.random().toString(36).slice(2, 10); // 이 화면의 번호 (같은 사람의 움직임을 이어 붙인다)
+  openTour({
+    user: { name, avatar: avatarOf(name) },
+    visit: { role },
+    room: cls.room,
+    npcs: cls.npcs,
+    presence: { sync: (me) => api.adminPresence(name, { ...me, sid, role }), leave: () => api.adminPresenceLeave(name, { sid, role }) },
+    onClose: () => back(),
+  });
+}
+
 // 부모님이 한 아이의 마음 쉼터 교실을 꾸민다: 선생님·친구를 만들고, 고치고, 지우고, 미리 본다
 async function screenParentClassroom(name) {
   setTopbar('none');
   let npcs;
+  let room;
   try {
-    ({ npcs } = await api.adminClassroom(name));
+    ({ npcs, room } = await api.adminClassroom(name));
   } catch (err) {
     toast(err.message, 'err');
     if (err.status === 401) screenParentLogin(); else screenParent();
@@ -1676,9 +1746,11 @@ async function screenParentClassroom(name) {
   const el = mount(`
     <div class="my">
       <button class="back-link" id="back">← 부모님 메뉴</button>
-      <h2 style="font-size:1.9rem">🏫 ${esc(name)}의 교실</h2>
+      <h2 style="font-size:1.9rem">🏫 ${esc(name)}의 교실${room && room.who ? ` <span class="chipv">${esc(room.who)}</span>` : ''}</h2>
+      <p class="pc-room">${esc(room ? room.label : '')}</p>
       <p class="sub">숙제를 모두 끝낸 ${esc(name)}이(가) 들어가는 마음 쉼터에 나오는 선생님과 친구들이에요. 만들고 고치면 바로 반영되고, 모두 교실을 돌아다녀요. (최대 12명)</p>
       <div class="pc-actions">
+        <button class="btn btn-coral small" id="visit">👪 엄마·아빠로 같이 들어가기</button>
         <button class="btn btn-yellow small" data-new="teacher">➕ 선생님 만들기</button>
         <button class="btn btn-blue small" data-new="friend">➕ 친구 만들기</button>
         <button class="btn btn-mint small" id="preview">🌈 이 교실 미리 보기</button>
@@ -1699,8 +1771,9 @@ async function screenParentClassroom(name) {
     sfx.pop();
     const avatar = (state.config.kids.find((k) => k.name === name) || {}).avatar || { animal: 0, color: 0, acc: 0 };
     // 이 아이가 보게 될 모습 그대로 둘러본다 (별은 저장되지 않는다)
-    openTour({ user: { name, avatar }, preview: true, npcs, onClose: () => screenParentClassroom(name) });
+    openTour({ user: { name, avatar }, preview: true, room, npcs, onClose: () => screenParentClassroom(name) });
   };
+  $('#visit', el).onclick = () => { sfx.tap(); enterClassroom(name, () => screenParentClassroom(name)); };
   $('#reset', el).onclick = async () => {
     sfx.tap();
     if (!(await confirmDialog({
@@ -1789,4 +1862,6 @@ async function boot() {
   screenLogin();
 }
 
+// 개발·점검용: localStorage.htf_debug = '1' 이면 화면을 직접 불러 볼 수 있다 (world.js 의 점검용 훅과 같은 방식)
+try { if (localStorage.getItem('htf_debug') === '1') window.__htfApp = { state, screenFinish, screenParent }; } catch (_) { /* 무시 */ }
 boot();

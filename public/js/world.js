@@ -26,8 +26,59 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 // 나: 노란 상의 + 검정 하의
 const PLAYER_LOOK = { skin: '#ffdcc0', hair: '#2a2018', hairStyle: 'short', top: '#ffd23f', bottom: '#1a1b25', bottomStyle: 'pants', glasses: false };
 
+// 엄마·아빠: 부모님이 아이의 교실에 같이 들어올 때의 모습 (아이의 노란 상의·검정 하의와 겹치지 않게)
+const PARENTS = {
+  mom: {
+    tag: '👩 엄마', tagBg: '#ffe3ee', word: '엄마',
+    look: { skin: '#ffd9bf', hair: '#3a2a22', hairStyle: 'long', top: '#f78fb3', bottom: '#4a4e69', bottomStyle: 'skirt', glasses: false },
+    hello: (n) => `${n}, 숙제 끝내느라 정말 수고했어 💛`,
+  },
+  dad: {
+    tag: '👨 아빠', tagBg: '#dff0ff', word: '아빠',
+    look: { skin: '#f6cfae', hair: '#241b16', hairStyle: 'short', top: '#4d7cc4', bottom: '#2b2d42', bottomStyle: 'pants', glasses: true },
+    hello: (n) => `${n}, 오늘도 멋지다! 최고야 👍`,
+  },
+};
+const PARENT_SCALE = 1.15;
+const SAYS = [
+  { icon: '💛', text: '오늘도 수고했어' },
+  { icon: '❤️', text: '사랑해' },
+  { icon: '👏', text: '정말 잘했어' },
+  { icon: '🤗', text: '이리 와, 안아 줄게' },
+];
+
+// 아이마다 교실 분위기가 다르다 (server/rooms.js 의 theme): 국화 반은 노랑·하양, 난초 반은 보라·분홍
+const THEMES = {
+  default: {
+    wall: 0xfff1d6, band: 0xbfe8d4, chairs: [0x8ecae6, 0xffb3c6, 0xb5e48c], lanterns: [0xffd9a0, 0xffc2d1, 0xcdeac0, 0xbde0fe],
+    rug: ['#ffd6a5', '#ffadad', '#fdffb6', '#caffbf', '#9bf6ff'], petals: null, plaque: '#fff3c4', plaqueInk: '#2b2d42', flower: '🌼',
+  },
+  chrysanthemum: {
+    wall: 0xfff4cf, band: 0xffd966, chairs: [0xffd166, 0xffe9a8, 0xf4b942], lanterns: [0xffe08a, 0xfff3b0, 0xffd166, 0xfff9d6],
+    rug: ['#fff3b0', '#ffe08a', '#ffd23f', '#fff9d6', '#ffc83d'], petals: ['#ffd23f', '#ffe58a', '#fff7cf', '#ffb703'], heart: '#f08a00',
+    plaque: '#fff0a8', plaqueInk: '#6b4a00', flower: '🌼',
+  },
+  orchid: {
+    wall: 0xf5ebff, band: 0xd8c0f5, chairs: [0xc7a6ff, 0xf3b6e2, 0xb8c0ff], lanterns: [0xe0c3ff, 0xffc2e8, 0xd7ccff, 0xf7d9ff],
+    rug: ['#ead7ff', '#d3b4f7', '#f6d1f0', '#f3e8ff', '#c9a0ec'], petals: ['#c77dff', '#e0aaff', '#f3d9ff', '#9d4edd'], heart: '#ffd166',
+    plaque: '#ecd8ff', plaqueInk: '#4a2670', flower: '🌸',
+  },
+};
+// 학년이 낮을수록 아이와 친구들이 조금 더 작다
+const KID_SCALE = (grade) => (grade === 1 ? 0.84 : grade >= 5 ? 0.98 : 0.95);
+const FRIEND_SCALE = (grade) => (grade === 1 ? 0.8 : grade >= 5 ? 0.97 : 0.92);
+
 // {이름} 은 그 아이의 이름 (세 글자 한국 이름이면 성을 뺀 이름)
 const givenName = (full) => (/^[가-힣]{3}$/.test(full) ? full.slice(1) : full);
+// 마지막 글자에 받침이 있는지 (한글이 아니면 없는 것으로 본다)
+const hasFinal = (name) => {
+  const code = String(name).charCodeAt(String(name).length - 1) - 0xac00;
+  return code >= 0 && code <= 11171 && code % 28 !== 0;
+};
+const vocative = (name) => `${name}${hasFinal(name) ? '아' : '야'}`; // 준선아, 하나야
+const subject = (name) => `${name}${hasFinal(name) ? '이' : '가'}`; // 준선이, 하나가
+const PRESENCE_MS = 250; // 같이 있는 사람의 위치를 이만큼마다 주고받는다
+const SAY_SHOW_MS = 5500;
 
 const WORDS = [
   { icon: '🌼', text: '고마워' },
@@ -321,22 +372,25 @@ export async function mountCharacterPreview(container, look, role = 'friend', na
 }
 
 // ────────────────────────────────────────────────────────────────
-export async function startWorld({ user, preview = false, npcs = [], onDone }) {
+// user: 이 교실의 주인(아이). visit: { role: 'mom' | 'dad' } 이면 부모님이 그 캐릭터로 같이 들어온 것.
+// room: server/rooms.js 의 교실 정보 { label, theme, grade }. presence: { sync(me), leave() } 이면 같이 있는 사람을 서로 본다.
+export async function startWorld({ user, preview = false, visit = null, room = null, npcs = [], presence = null, onDone }) {
   const root = document.createElement('div');
   root.className = 'world';
-  root.innerHTML = '<div class="world-card"><div class="boot-clock">🌈</div><h2>마음 쉼터를 준비하는 중…</h2></div>';
+  root.innerHTML = `<div class="world-card"><div class="boot-clock">🌈</div><h2>${visit ? '교실에 들어가는 중…' : '마음 쉼터를 준비하는 중…'}</h2></div>`;
   document.body.appendChild(root);
 
   const ctl = { disposed: false, dispose() { this.disposed = true; teardown(); } };
   let teardown = () => root.remove();
   const finishOnce = (() => { let done = false; return (res) => { if (!done) { done = true; ctl.dispose(); onDone(res); } }; })();
+  const fallback = () => (visit ? fallbackVisit(root, { finish: finishOnce }, ctl) : fallbackRest(root, { finish: finishOnce }, ctl));
 
   let T;
   try {
     T = await loadThree();
   } catch (err) {
     console.warn('[world] three.js 를 불러오지 못했어요', err);
-    return fallbackRest(root, { finish: finishOnce }, ctl);
+    return fallback();
   }
   if (ctl.disposed) return ctl;
 
@@ -345,22 +399,27 @@ export async function startWorld({ user, preview = false, npcs = [], onDone }) {
     renderer = new T.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
   } catch (err) {
     console.warn('[world] WebGL 을 쓸 수 없어요', err);
-    return fallbackRest(root, { finish: finishOnce }, ctl);
+    return fallback();
   }
 
   // ───────── 화면 뼈대 ─────────
   const emoji = ANIMALS[user.avatar?.animal ?? 0] || '🦊';
+  const parent = visit ? PARENTS[visit.role] : null;
+  const self = parent ? { look: parent.look, tag: parent.tag, tagBg: parent.tagBg, scale: PARENT_SCALE, kind: visit.role } : null;
+  const kidGiven = givenName(user.name);
   root.innerHTML = `
     <div class="world-stage" id="w-stage"></div>
     <div class="world-hud" id="w-hud" hidden>
       <div class="wh-top">
-        <div class="wh-pill" id="w-stars">⭐ 0 / ${TOUR_STARS}</div>
-        <div class="wh-pill" id="w-time">🕒 ${fmt(TOUR_SECONDS)}</div>
+        <div class="wh-pill" id="w-stars"${visit ? ' hidden' : ''}>⭐ 0 / ${TOUR_STARS}</div>
+        <div class="wh-pill" id="w-time"${visit ? ' hidden' : ''}>🕒 ${fmt(TOUR_SECONDS)}</div>
+        <div class="wh-pill wh-room" id="w-room"${visit ? '' : ' hidden'}>🏫 ${esc(room?.label || '교실')}</div>
+        <div class="wh-pill wh-who" id="w-who" hidden></div>
         <div class="wh-spacer"></div>
         <button class="wh-btn" id="w-mute" aria-label="소리 켜기/끄기">${sfx.muted ? '🔇' : '🔊'}</button>
-        <button class="wh-btn" id="w-exit">🏁 마치기</button>
+        <button class="wh-btn" id="w-exit">${visit ? '🚪 나가기' : '🏁 마치기'}</button>
       </div>
-      <div class="wh-guide" id="w-guide">
+      <div class="wh-guide" id="w-guide"${visit ? ' hidden' : ''}>
         <div class="wh-arrow" id="w-arrow">▲</div>
         <div><b id="w-g-title"></b><small id="w-g-sub"></small></div>
       </div>
@@ -376,7 +435,7 @@ export async function startWorld({ user, preview = false, npcs = [], onDone }) {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.6));
 
   // ───────── 장면 만들기 ─────────
-  const world = buildScene(T, { user, emoji, npcs });
+  const world = buildScene(T, { user, emoji, npcs, room, self });
   const { scene, camera, player, colliders, stops, bunny } = world;
   const crowd = world.npcs;
 
@@ -460,7 +519,10 @@ export async function startWorld({ user, preview = false, npcs = [], onDone }) {
     sfx.setMuted(!sfx.muted);
     $('#w-mute').textContent = sfx.muted ? '🔇' : '🔊';
   });
-  $('#w-exit').addEventListener('click', () => { if (state.running) finishTour('exit'); });
+  $('#w-exit').addEventListener('click', () => {
+    if (!state.running) return;
+    if (visit) { state.running = false; finishOnce({ visit: true, stars: 0, seconds: Math.round(state.elapsed), skipped: false }); } else finishTour('exit');
+  });
 
   // ───────── 말풍선·미션 패널 ─────────
   const bubble = $('#w-bubble');
@@ -506,6 +568,8 @@ export async function startWorld({ user, preview = false, npcs = [], onDone }) {
   act.addEventListener('click', (e) => {
     const b = e.target.closest('[data-word]');
     if (b) chooseWord(WORDS[Number(b.dataset.word)]);
+    const s = e.target.closest('[data-say]');
+    if (s) speak(Number(s.dataset.say));
   });
 
   // ───────── 한 프레임 ─────────
@@ -548,7 +612,8 @@ export async function startWorld({ user, preview = false, npcs = [], onDone }) {
     world.animatePlayer(lastSpeed, t);
     world.animate(t, dt, pos, state);
 
-    if (state.running) handleStops(dt);
+    if (state.running) { if (visit) handleVisit(); else handleStops(dt); }
+    placeSays(t);
 
     // 카메라 (뒤에서 따라가기). 벽에 막히면 거리를 줄이고 조금 더 위에서 내려다본다
     const baseDist = 5.0;
@@ -576,7 +641,7 @@ export async function startWorld({ user, preview = false, npcs = [], onDone }) {
     camera.updateMatrixWorld(true);
 
     if (state.running && t - state.lastHudAt > 0.2) { state.lastHudAt = t; updateHud(); }
-    if (state.running && state.elapsed >= TOUR_SECONDS) finishTour('time');
+    if (state.running && !visit && state.elapsed >= TOUR_SECONDS) finishTour('time');
   }
 
   const insideStop = (s) => Math.hypot(pos.x - s.x, pos.z - s.z) < s.r;
@@ -642,23 +707,158 @@ export async function startWorld({ user, preview = false, npcs = [], onDone }) {
       } else state.bunnyT = Math.max(0, state.bunnyT - dt * 0.5);
     }
 
-    // 선생님·친구 인사
-    let near = null;
-    let nearD = 2.5;
-    for (const n of crowd) {
-      const d = Math.hypot(pos.x - n.group.position.x, pos.z - n.group.position.z);
-      if (d < nearD) { nearD = d; near = n; }
-    }
+    // 선생님·친구(그리고 같이 온 엄마·아빠) 인사
+    const near = nearTalker();
     if (near) {
-      bubble.hidden = false;
-      bubble.innerHTML = `<b>${esc(near.data.name)}</b>${esc(near.msg)}`;
-      placeOver(bubble, near.group, 2.0);
+      showNear(near);
       if (!state.greeted.has(near.data.id)) {
         state.greeted.add(near.data.id);
         sfx.pop();
-        if (state.greeted.size <= GREET_STARS) gainStar(`greet${state.greeted.size}`, `${near.data.name}와 인사했어요`);
+        if (state.greeted.size <= GREET_STARS) gainStar(`greet${state.greeted.size}`, `${near.data.name}${hasFinal(near.data.name) ? '과' : '와'} 인사했어요`);
       }
     } else bubble.hidden = true;
+  }
+
+  // 인사를 나눌 수 있는 상대: 선생님·친구, 그리고 아이 화면에서는 같이 온 엄마·아빠
+  function talkers() {
+    const list = crowd.slice();
+    if (!visit) {
+      for (const p of world.peers.values()) {
+        if (p.kind === 'kid') continue; // eslint-disable-line no-continue
+        const hello = PARENTS[p.kind].hello(vocative(kidGiven));
+        list.push({
+          data: { id: `peer:${p.kind}`, name: PARENTS[p.kind].word },
+          group: p.group,
+          msg: p.say && performance.now() - p.sayLocalAt < SAY_SHOW_MS ? p.say : hello,
+          role: 'parent',
+        });
+      }
+    }
+    return list;
+  }
+  function nearTalker() {
+    let near = null;
+    let nearD = 2.5;
+    for (const n of talkers()) {
+      const d = Math.hypot(pos.x - n.group.position.x, pos.z - n.group.position.z);
+      if (d < nearD) { nearD = d; near = n; }
+    }
+    state.nearKey = near ? near.data.id : '';
+    return near;
+  }
+  function showNear(near) {
+    bubble.hidden = false;
+    bubble.innerHTML = `<b>${esc(near.data.name)}</b>${esc(near.msg)}`;
+    placeOver(bubble, near.group, 2.0);
+  }
+
+  // 부모님이 교실을 둘러볼 때: 미션 없이 걸어 다니고, 가까이 가면 선생님·친구가 인사한다
+  function handleVisit() {
+    const near = nearTalker();
+    if (near) showNear(near); else bubble.hidden = true;
+  }
+
+  // ───────── 같이 있는 사람: 위치 주고받기, 말풍선 ─────────
+  const says = new Map(); // 사람 id('me' 는 나) → { el, until, peer }
+  function showSay(key, peer, text) {
+    const old = says.get(key);
+    if (old) old.el.remove();
+    const el = document.createElement('div');
+    el.className = 'wh-bubble say';
+    el.textContent = text;
+    $('#w-hud').appendChild(el);
+    says.set(key, { el, until: performance.now() + SAY_SHOW_MS, peer });
+  }
+  function placeSays(t) {
+    if (!says.size) return;
+    const now = performance.now();
+    for (const [key, s] of says) {
+      const target = key === 'me' ? player : s.peer && s.peer.group;
+      if (now > s.until || !target || (s.peer && !world.peers.has(s.peer.id))) { s.el.remove(); says.delete(key); continue; } // eslint-disable-line no-continue
+      // 가까이 있으면 이미 이름표 말풍선에 같은 말이 나오니 겹치지 않게 숨긴다
+      s.el.style.display = s.peer && state.nearKey === `peer:${s.peer.kind}` ? 'none' : '';
+      placeOver(s.el, target, 2.45 + Math.sin(t * 3) * 0.02);
+    }
+  }
+  const toastNote = (text) => {
+    const el = document.createElement('div');
+    el.className = 'wh-toast note';
+    el.textContent = text;
+    root.appendChild(el);
+    setTimeout(() => el.remove(), 3200);
+  };
+  const whoPill = $('#w-who');
+  function updateWho() {
+    const list = [...world.peers.values()];
+    if (visit) {
+      const kid = list.some((p) => p.kind === 'kid');
+      whoPill.hidden = false;
+      whoPill.textContent = kid ? `${emoji} ${user.name} 교실에 있어요` : `🕓 ${user.name} 아직 안 왔어요`;
+      whoPill.classList.toggle('here', kid);
+    } else {
+      const ps = list.filter((p) => p.kind !== 'kid');
+      whoPill.hidden = !ps.length;
+      whoPill.textContent = ps.map((p) => PARENTS[p.kind].tag).join(' · ') + ' 같이 있어요';
+      const note = root.querySelector('#w-pnote');
+      if (note) { note.hidden = !ps.length; note.textContent = `${ps.map((p) => PARENTS[p.kind].tag).join(', ')}${ps.length ? '가 교실에 와 있어요' : ''}`; }
+    }
+  }
+  function applyPeers(list) {
+    const r = world.syncPeers(list);
+    const t = performance.now();
+    for (const p of r.joined) {
+      sfx.pop();
+      toastNote(visit
+        ? `${emoji} ${subject(user.name)} 교실에 들어왔어요!`
+        : `${PARENTS[p.kind].tag}가 교실에 왔어요! 가서 인사해 볼까요?`);
+    }
+    for (const p of r.left) {
+      if (!visit && p.kind !== 'kid') toastNote(`${PARENTS[p.kind].tag}가 교실을 나갔어요`);
+      else if (visit && p.kind === 'kid') toastNote(`${emoji} ${subject(user.name)} 교실을 나갔어요`);
+    }
+    for (const p of r.said) {
+      p.sayLocalAt = t;
+      if (p.kind !== 'kid') { showSay(p.id, p, p.say); sfx.pop(); }
+    }
+    if (r.joined.length || r.left.length) updateWho();
+  }
+
+  let pBusy = false;
+  let pNext = 0;
+  let pDead = false;
+  let pSay = '';
+  async function syncPresence(now) {
+    if (!presence || pBusy || pDead || ctl.disposed || now < pNext) return;
+    pBusy = true;
+    pNext = now + PRESENCE_MS;
+    const say = pSay;
+    pSay = '';
+    try {
+      const r = await presence.sync({
+        x: Math.round(pos.x * 100) / 100,
+        z: Math.round(pos.z * 100) / 100,
+        ry: Math.round(player.rotation.y * 100) / 100,
+        mv: Math.round(lastSpeed * 100) / 100,
+        say,
+      });
+      if (!ctl.disposed) applyPeers((r && r.others) || []);
+    } catch (err) {
+      pSay = say || pSay;
+      pNext = performance.now() + 2500; // 잠깐 쉬었다가 다시 시도
+      if (err && err.status === 401) { pDead = true; if (visit) toastNote('부모님 비밀번호 시간이 끝나서 같이 있는 모습이 멈췄어요'); }
+    } finally {
+      pBusy = false;
+    }
+  }
+
+  // 부모님이 자리에서 한마디 (모두에게 말풍선으로 보인다)
+  function speak(i) {
+    const s = SAYS[i];
+    if (!s) return;
+    sfx.pop();
+    pSay = `${s.icon} ${s.text}`;
+    showSay('me', null, pSay);
+    pNext = 0; // 바로 알린다
   }
 
   function spawnHearts(obj) {
@@ -682,6 +882,7 @@ export async function startWorld({ user, preview = false, npcs = [], onDone }) {
 
   // ───────── HUD ─────────
   function updateHud() {
+    if (visit) return;
     $('#w-time').textContent = `🕒 ${fmt(Math.max(0, TOUR_SECONDS - state.elapsed))}`;
     const g = nextGoal();
     $('#w-g-title').textContent = g.title;
@@ -705,10 +906,11 @@ export async function startWorld({ user, preview = false, npcs = [], onDone }) {
     if (!S.has('board')) return { title: '✏️ 칠판에 고마운 말 쓰기', sub: '칠판 앞 동그라미에 서 봐요', target: stops.board };
     if (!S.has('bunny')) return { title: '🐰 토끼 친구 만나기', sub: '토끼 곁에 가만히 서 있어 봐요', target: bunny.group.position };
     const gs = Math.min(GREET_STARS, state.greeted.size);
-    if (gs < GREET_STARS && crowd.length) {
+    const tk = talkers();
+    if (gs < GREET_STARS && tk.length) {
       let best = null;
       let bd = 1e9;
-      for (const n of crowd) {
+      for (const n of tk) {
         if (state.greeted.has(n.data.id)) continue;
         const d = Math.hypot(pos.x - n.group.position.x, pos.z - n.group.position.z);
         if (d < bd) { bd = d; best = n; }
@@ -723,11 +925,32 @@ export async function startWorld({ user, preview = false, npcs = [], onDone }) {
   function showIntro() {
     card.hidden = false;
     const teachers = crowd.filter((n) => n.role === 'teacher').map((n) => n.data.name);
+    if (visit) {
+      card.innerHTML = `
+        <div class="world-intro">
+          <div class="wi-emoji">${parent.tag.split(' ')[0]}</div>
+          <h2>${esc(user.name)}의 교실</h2>
+          <p class="wi-room">🏫 ${esc(room?.label || '교실')}</p>
+          <p>${esc(parent.word)} 캐릭터로 교실에 들어가요.<br>${esc(user.name)}${hasFinal(user.name) ? '이' : '가'} 쉼터에 있으면 서로 볼 수 있어요.</p>
+          <ul>
+            <li>🕹️ 왼쪽 조이스틱으로 걸어요 (키보드는 WASD)</li>
+            <li>💬 아래 버튼으로 한마디를 전해요</li>
+            ${teachers.length ? `<li>🧑‍🏫 ${esc(teachers.join(', '))}도 교실에 계세요</li>` : ''}
+          </ul>
+          <button class="btn btn-yellow big" id="w-go">🚪 교실에 들어가기</button>
+          <button class="back-link" id="w-skip">← 돌아가기</button>
+        </div>`;
+      $('#w-go').onclick = beginTour;
+      $('#w-skip').onclick = () => finishOnce({ visit: true, stars: 0, seconds: 0, skipped: true });
+      return;
+    }
     card.innerHTML = `
       <div class="world-intro">
         <div class="wi-emoji">🌈</div>
         <h2>마음 쉼터</h2>
+        ${room?.label ? `<p class="wi-room">🏫 ${esc(room.label)}</p>` : ''}
         <p>숙제를 모두 끝낸 선물이에요.<br>교실을 천천히 걸으며 <b>5분</b> 동안 눈과 마음을 쉬어요.</p>
+        <p class="wi-note wi-parent" id="w-pnote" hidden></p>
         ${teachers.length ? `<p class="wi-note">🧑‍🏫 ${esc(teachers.join(', '))}도 교실에 계세요</p>` : ''}
         <ul>
           <li>🕹️ 왼쪽 조이스틱으로 걸어요 (키보드는 WASD)</li>
@@ -751,6 +974,10 @@ export async function startWorld({ user, preview = false, npcs = [], onDone }) {
     state.running = true;
     state.elapsed = 0;
     updateHud();
+    if (visit) {
+      setAct('say', `<div class="act-card say-card"><b>한마디 전하기</b><div class="act-words">${SAYS.map((s, i) => `<button class="btn btn-white small" data-say="${i}">${s.icon} ${s.text}</button>`).join('')}</div></div>`);
+      updateWho();
+    }
   }
 
   function finishTour(reason) {
@@ -787,6 +1014,7 @@ export async function startWorld({ user, preview = false, npcs = [], onDone }) {
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
     update(dt);
+    syncPresence(now);
     renderer.render(scene, camera);
     // 느린 기기: 해상도를 낮춰서 부드럽게
     slow = dt > 0.034 ? slow + 1 : Math.max(0, slow - 1);
@@ -800,6 +1028,7 @@ export async function startWorld({ user, preview = false, npcs = [], onDone }) {
     window.removeEventListener('keydown', onKeyDown);
     window.removeEventListener('keyup', onKeyUp);
     sfx.ambientStop();
+    if (presence) { try { Promise.resolve(presence.leave()).catch(() => {}); } catch (_) { /* 무시 */ } } // 교실을 나갔다고 알린다
     world.dispose();
     renderer.dispose();
     renderer.forceContextLoss?.();
@@ -808,7 +1037,7 @@ export async function startWorld({ user, preview = false, npcs = [], onDone }) {
 
   showIntro();
   // 개발·점검용: localStorage.htf_debug = '1' 이면 밖에서 상태를 읽고 한 프레임씩 돌려 볼 수 있다
-  ctl.debug = { state, input, pos, player, camera, scene, stops, crowd, bunny, colliders, update, renderer, beginTour, finishTour, gainStar, nextGoal, world };
+  ctl.debug = { state, input, pos, player, camera, scene, stops, crowd, bunny, colliders, update, renderer, beginTour, finishTour, gainStar, nextGoal, world, applyPeers, speak, says, talkers };
   try { if (localStorage.getItem('htf_debug') === '1') window.__htfWorld = ctl; } catch (_) { /* 무시 */ }
   return ctl;
 }
@@ -871,7 +1100,7 @@ function routeTo(a, b) {
 
 // ────────────────────────────────────────────────────────────────
 // 장면: 교실, 가구, 친구와 선생님, 토끼, 빛과 먼지
-function buildScene(T, { user, emoji, npcs }) {
+function buildScene(T, { user, emoji, npcs, room, self }) {
   const scene = new T.Scene();
   scene.background = new T.Color(0xd6ecff);
   scene.fog = new T.Fog(0xd6ecff, 30, 130);
@@ -880,6 +1109,8 @@ function buildScene(T, { user, emoji, npcs }) {
   const tb = toolbox(T);
   const { M, canvasTex } = tb;
   const kit = characterKit(T, tb);
+  const theme = THEMES[room?.theme] || THEMES.default;
+  const grade = room?.grade || 0;
   const place = (obj, x, y, z) => { obj.position.set(x, y, z); return obj; };
   const box = (w, h, d, color, x, y, z, parent = scene, opts) => {
     const m = new T.Mesh(new T.BoxGeometry(w, h, d), M(color, opts));
@@ -895,6 +1126,59 @@ function buildScene(T, { user, emoji, npcs }) {
     g.fillStyle = gr;
     g.fillRect(0, 0, 64, 64);
   });
+
+  // 우리 반 꽃(국화/난초)을 그린다: 문패, 화분, 러그, 창가 화단에 쓴다
+  function drawFlower(g, cx, cy, s) {
+    const pc = theme.petals;
+    if (!pc) return;
+    g.save();
+    g.translate(cx, cy);
+    const petal = (ang, rx, ry, dist, color) => {
+      g.save();
+      g.rotate(ang);
+      g.fillStyle = color;
+      g.beginPath();
+      g.ellipse(0, -dist, rx, ry, 0, 0, Math.PI * 2);
+      g.fill();
+      g.strokeStyle = 'rgba(43,45,66,.35)';
+      g.lineWidth = Math.max(1, s * 0.03);
+      g.stroke();
+      g.restore();
+    };
+    if (room.theme === 'orchid') {
+      // 호접란: 위의 큰 꽃잎 둘, 아래의 가는 꽃잎 둘, 가운데 입술과 꽃술
+      petal(-1.25, s * 0.48, s * 0.4, s * 0.38, pc[1]);
+      petal(1.25, s * 0.48, s * 0.4, s * 0.38, pc[1]);
+      petal(0, s * 0.28, s * 0.4, s * 0.52, pc[0]);
+      petal(2.55, s * 0.24, s * 0.46, s * 0.42, pc[0]);
+      petal(-2.55, s * 0.24, s * 0.46, s * 0.42, pc[0]);
+      g.fillStyle = pc[3];
+      g.beginPath(); g.ellipse(0, s * 0.18, s * 0.17, s * 0.24, 0, 0, Math.PI * 2); g.fill();
+      g.fillStyle = '#ffd166';
+      g.beginPath(); g.arc(0, -s * 0.05, s * 0.1, 0, Math.PI * 2); g.fill();
+    } else {
+      // 국화: 가는 꽃잎이 겹겹이
+      [[26, 0.82, 0.13, 0.5, pc[3]], [20, 0.66, 0.12, 0.4, pc[0]], [14, 0.46, 0.11, 0.28, pc[1]], [9, 0.28, 0.1, 0.16, pc[2]]].forEach(([n, len, wd, dist, color], li) => {
+        for (let i = 0; i < n; i += 1) petal((i / n) * Math.PI * 2 + li * 0.2, s * wd, s * len * 0.5, s * dist, color);
+      });
+      g.fillStyle = theme.heart;
+      g.beginPath(); g.arc(0, 0, s * 0.1, 0, Math.PI * 2); g.fill();
+    }
+    g.restore();
+  }
+  const flowerMap = theme.petals ? canvasTex(128, 128, (g) => drawFlower(g, 64, 64, 58)) : null;
+  const flowerSprite = (size) => {
+    const sp = new T.Sprite(new T.SpriteMaterial({ map: flowerMap, transparent: true, depthWrite: false }));
+    sp.scale.set(size, size, 1);
+    return sp;
+  };
+  const flowerDecal = (x, y, z, ry, size, rot = 0) => {
+    const m = new T.Mesh(new T.PlaneGeometry(size, size), new T.MeshBasicMaterial({ map: flowerMap, transparent: true, depthWrite: false }));
+    m.position.set(x, y, z);
+    m.rotation.set(0, ry, rot);
+    scene.add(m);
+    return m;
+  };
 
   // ── 빛 ──
   scene.add(new T.HemisphereLight(0xfff6e6, 0xc9a77c, 2.2));
@@ -930,8 +1214,8 @@ function buildScene(T, { user, emoji, npcs }) {
   }
 
   // ── 벽 (왼쪽은 창문) ──
-  const WALL = 0xfff1d6;
-  const BAND = 0xbfe8d4;
+  const WALL = theme.wall;
+  const BAND = theme.band;
   box(0.3, ROOM.h, ROOM.z * 2, WALL, ROOM.x + 0.15, ROOM.h / 2, 0);
   box(ROOM.x * 2, ROOM.h, 0.3, WALL, 0, ROOM.h / 2, -ROOM.z - 0.15);
   box(ROOM.x * 2, ROOM.h, 0.3, WALL, 0, ROOM.h / 2, ROOM.z + 0.15);
@@ -1071,6 +1355,28 @@ function buildScene(T, { user, emoji, npcs }) {
   clockMesh.position.set(5.2, 2.9, -ROOM.z + 0.14);
   scene.add(clockMesh);
 
+  // 우리 반 문패: 칠판 위에 "5학년 국화 반" 같은 이름표를 건다
+  if (room?.label) {
+    const plaqueTex = canvasTex(1024, 84, (g, w, h) => {
+      g.fillStyle = theme.plaque;
+      const r = 34;
+      g.beginPath(); g.moveTo(r, 4); g.lineTo(w - r, 4); g.quadraticCurveTo(w - 4, 4, w - 4, h / 2); g.quadraticCurveTo(w - 4, h - 4, w - r, h - 4);
+      g.lineTo(r, h - 4); g.quadraticCurveTo(4, h - 4, 4, h / 2); g.quadraticCurveTo(4, 4, r, 4); g.fill();
+      g.lineWidth = 6; g.strokeStyle = '#2b2d42'; g.stroke();
+      g.fillStyle = theme.plaqueInk; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.font = '700 66px Jua, "Malgun Gothic", sans-serif';
+      g.fillText(`${theme.flower} ${room.label} ${theme.flower}`, w / 2, h / 2 + 4);
+    });
+    const plaque = new T.Mesh(new T.PlaneGeometry(5.2, 0.43), new T.MeshBasicMaterial({ map: plaqueTex, transparent: true }));
+    plaque.position.set(-1.0, 3.37, -ROOM.z + 0.14);
+    scene.add(plaque);
+  }
+  if (flowerMap) {
+    // 문패 양옆과 오른쪽 벽 위쪽에 꽃 장식
+    [-3.95, -4.45, -4.95, 2.0, 2.5, 3.0, 3.5].forEach((x, i) => flowerDecal(x, 3.37 - (i % 2) * 0.04, -ROOM.z + 0.15, 0, 0.42 + (i % 3) * 0.04, i * 0.7));
+    for (let z = -6; z <= 6; z += 1.5) flowerDecal(ROOM.x - 0.17, 3.28, z, -Math.PI / 2, 0.46, z);
+  }
+
   function poster(text, sub, color, x, y, z, ry) {
     const tex = canvasTex(256, 340, (g, w, h) => {
       g.fillStyle = color; g.fillRect(0, 0, w, h);
@@ -1092,7 +1398,7 @@ function buildScene(T, { user, emoji, npcs }) {
   poster('쉬는 시간\n눈 쉬기', '👀', '#fdffb6', 2.2, 2.0, ROOM.z - 0.17, Math.PI);
 
   // ── 책상과 의자 (줄 사이 통로는 사람이 지나다닐 만큼 넓다) ──
-  const chairColors = [0x8ecae6, 0xffb3c6, 0xb5e48c];
+  const chairColors = theme.chairs;
   const rows = [-2.4, 0.1, 2.6];
   const cols = [1.4, 3.4, 5.4, 7.4];
   const seats = [];
@@ -1151,9 +1457,10 @@ function buildScene(T, { user, emoji, npcs }) {
   // ── 독서 러그와 쿠션 ──
   const RUG = { x: -5.5, z: 3.6 };
   const rugTex = canvasTex(256, 256, (g, w, h) => {
-    ['#ffd6a5', '#ffadad', '#fdffb6', '#caffbf', '#9bf6ff'].forEach((c, i) => {
+    theme.rug.forEach((c, i) => {
       g.fillStyle = c; g.beginPath(); g.arc(w / 2, h / 2, w / 2 - i * 24, 0, 7); g.fill();
     });
+    drawFlower(g, w / 2, h / 2, 62); // 우리 반 꽃이 러그 한가운데에
   });
   const rug = new T.Mesh(new T.CircleGeometry(2.4, 40), new T.MeshLambertMaterial({ map: rugTex }));
   rug.rotation.x = -Math.PI / 2;
@@ -1178,20 +1485,63 @@ function buildScene(T, { user, emoji, npcs }) {
     const pot = new T.Mesh(new T.CylinderGeometry(0.28, 0.2, 0.4, 10), M(0xe07a5f));
     pot.position.y = 0.2;
     g.add(pot);
-    [[0, 0.75, 0, 0.34], [0.2, 0.62, 0.1, 0.24], [-0.2, 0.66, -0.08, 0.26]].forEach(([px, py, pz, r]) => {
-      const leaf = new T.Mesh(new T.SphereGeometry(r, 10, 8), M(0x6dbb7a));
-      leaf.position.set(px, py, pz);
+    if (room?.theme === 'chrysanthemum') {
+      // 국화 화분: 동글동글한 꽃송이
+      const base = new T.Mesh(new T.SphereGeometry(0.3, 10, 8), M(0x5aab6a));
+      base.position.y = 0.5;
+      g.add(base);
+      [[0, 0.82, 0], [0.22, 0.7, 0.1], [-0.22, 0.74, -0.08], [0.08, 0.66, -0.22], [-0.12, 0.64, 0.2], [0.28, 0.84, -0.12], [-0.26, 0.86, 0.08], [0, 0.98, 0.04]].forEach(([px, py, pz], i) => {
+        const f = new T.Mesh(new T.SphereGeometry(0.15, 10, 8), M(theme.petals[i % 4]));
+        f.position.set(px, py, pz);
+        g.add(f);
+      });
+    } else if (room?.theme === 'orchid') {
+      // 난초 화분: 휘어진 줄기에 꽃이 줄줄이
+      [[0.0, 0.22], [0.1, -0.18]].forEach(([lean, ph], si) => {
+        for (let k = 0; k < 4; k += 1) {
+          const seg = new T.Mesh(new T.CylinderGeometry(0.014, 0.018, 0.3, 5), M(0x5aab6a));
+          seg.position.set(lean * 0.4 + k * 0.07 * (si ? -1 : 1), 0.5 + k * 0.27, 0);
+          seg.rotation.z = (si ? 0.28 : -0.28) + k * 0.14 * (si ? -1 : 1);
+          g.add(seg);
+          if (k > 0) {
+            const fl = flowerSprite(0.34 - k * 0.02);
+            fl.position.set(seg.position.x + (si ? -0.06 : 0.06), seg.position.y + 0.05 + ph * 0.1, 0.04);
+            g.add(fl);
+          }
+        }
+      });
+      const leaf = new T.Mesh(new T.SphereGeometry(0.2, 10, 8), M(0x6dbb7a));
+      leaf.scale.set(1.5, 0.45, 1);
+      leaf.position.y = 0.46;
       g.add(leaf);
-    });
+    } else {
+      [[0, 0.75, 0, 0.34], [0.2, 0.62, 0.1, 0.24], [-0.2, 0.66, -0.08, 0.26]].forEach(([px, py, pz, r]) => {
+        const leaf = new T.Mesh(new T.SphereGeometry(r, 10, 8), M(0x6dbb7a));
+        leaf.position.set(px, py, pz);
+        g.add(leaf);
+      });
+    }
     scene.add(place(g, x, 0, z));
     colliders.push({ x, z, r: 0.35 });
   }
   [[-8.2, -6.2], [8.2, -6.2], [-8.2, 6.3], [8.2, 0.1], [-1.2, 6.2]].forEach(([x, z]) => plant(x, z));
+  if (flowerMap) {
+    // 창가 화단: 창틀 위에 우리 반 꽃이 늘어서 있다
+    for (const zc of [-4.2, 0, 4.2]) {
+      box(0.3, 0.18, 3.0, 0xb07a4a, -ROOM.x + 0.3, 1.07, zc);
+      box(0.26, 0.05, 2.9, 0x5aab6a, -ROOM.x + 0.3, 1.18, zc);
+      for (let k = 0; k < 6; k += 1) {
+        const fl = flowerSprite(0.3 + (k % 2) * 0.06);
+        fl.position.set(-ROOM.x + 0.34, 1.36 + (k % 2) * 0.05, zc - 1.25 + k * 0.5);
+        scene.add(fl);
+      }
+    }
+  }
 
   const lanterns = [];
   [[-6, 0.3, 2.9], [-2.5, -3, 2.8], [1.5, 1.2, 3.0], [5.5, -4, 2.85], [-6, 5.2, 2.9], [3, 5.6, 2.8]].forEach(([x, z, y], i) => {
     const g = new T.Group();
-    const orb = new T.Mesh(new T.SphereGeometry(0.2, 14, 10), new T.MeshBasicMaterial({ color: [0xffd9a0, 0xffc2d1, 0xcdeac0, 0xbde0fe][i % 4] }));
+    const orb = new T.Mesh(new T.SphereGeometry(0.2, 14, 10), new T.MeshBasicMaterial({ color: theme.lanterns[i % 4] }));
     orb.scale.y = 1.2;
     g.add(orb);
     const cord = new T.Mesh(new T.CylinderGeometry(0.008, 0.008, ROOM.h - y, 4), M(0x888888));
@@ -1210,7 +1560,9 @@ function buildScene(T, { user, emoji, npcs }) {
   scene.add(dust);
 
   // ── 나 ──
-  const player = kit.make(PLAYER_LOOK, { name: `${emoji} ${user.name}`, scale: 0.95, tagBg: '#fff7c2' });
+  const kidDesc = { look: PLAYER_LOOK, tag: `${emoji} ${user.name}`, tagBg: '#fff7c2', scale: KID_SCALE(grade) };
+  const me = self || kidDesc;
+  const player = kit.make(me.look, { name: me.tag, scale: me.scale, tagBg: me.tagBg });
   scene.add(player);
 
   // ── 친구와 선생님: 스스로 걸어 다닌다 ──
@@ -1225,7 +1577,7 @@ function buildScene(T, { user, emoji, npcs }) {
   const kidGiven = givenName(user.name);
   const crowd = (npcs || []).map((data, i) => {
     const teacher = data.role === 'teacher';
-    const g = kit.make(data.look, { name: data.name, scale: teacher ? 1.12 : 0.92, tagBg: teacher ? '#e3f1ff' : '#ffffff' });
+    const g = kit.make(data.look, { name: data.name, scale: teacher ? 1.12 : FRIEND_SCALE(grade), tagBg: teacher ? '#e3f1ff' : '#ffffff' });
     const sp = SPAWN[i % SPAWN.length];
     g.position.set(sp[0] + (i >= SPAWN.length ? 0.6 : 0), 0, sp[1]);
     g.rotation.y = rand(-Math.PI, Math.PI);
@@ -1310,7 +1662,7 @@ function buildScene(T, { user, emoji, npcs }) {
     return true;
   }
 
-  const sep = (n, pp, dt) => {
+  const sep = (n, hs, dt) => {
     const p = n.group.position;
     const push = (ox, oz, min) => {
       const dx = p.x - ox;
@@ -1319,17 +1671,23 @@ function buildScene(T, { user, emoji, npcs }) {
       if (d < min && d > 1e-4) { const k = ((min - d) / min) * 2.2 * dt; p.x += (dx / d) * k; p.z += (dz / d) * k; }
     };
     for (const o of crowd) { if (o !== n && o.state !== 'sit') push(o.group.position.x, o.group.position.z, 0.8); }
-    push(pp.x, pp.z, 0.95);
+    for (const h of hs) push(h.x, h.z, 0.95);
   };
   const faceTo = (g, x, z, k, dt) => {
     g.rotation.y += angleDelta(g.rotation.y, Math.atan2(x - g.position.x, z - g.position.z)) * (1 - Math.exp(-k * dt));
   };
 
-  function brain(n, t, dt, pp) {
+  // hs: 지금 교실에 있는 사람들의 위치 (나, 그리고 같이 온 엄마·아빠 또는 아이). 가장 가까운 사람에게 인사한다.
+  function brain(n, t, dt, hs) {
     const g = n.group;
     const p = g.position;
     const u = g.userData;
-    const dP = Math.hypot(pp.x - p.x, pp.z - p.z);
+    let pp = hs[0];
+    let dP = Math.hypot(pp.x - p.x, pp.z - p.z);
+    for (let i = 1; i < hs.length; i += 1) {
+      const d = Math.hypot(hs[i].x - p.x, hs[i].z - p.z);
+      if (d < dP) { dP = d; pp = hs[i]; }
+    }
     let moving = false;
     let waveOn = false;
     let gesture = 0;
@@ -1405,7 +1763,7 @@ function buildScene(T, { user, emoji, npcs }) {
 
     if (n.state !== 'sit') {
       resolve(p, colliders, n.radius, true);
-      sep(n, pp, dt);
+      sep(n, hs, dt);
     }
 
     // 몸짓
@@ -1499,19 +1857,74 @@ function buildScene(T, { user, emoji, npcs }) {
   }
   const starTex = iconTex('⭐');
 
+  // ── 같이 있는 사람들: 서버가 알려 주는 위치대로 걷는 엄마·아빠(또는 아이) ──
+  const peers = new Map();
+  const peerDesc = (kind) => (kind === 'kid' ? kidDesc : { look: PARENTS[kind].look, tag: PARENTS[kind].tag, tagBg: PARENTS[kind].tagBg, scale: PARENT_SCALE });
+  function syncPeers(list) {
+    const seen = new Set();
+    const out = { joined: [], left: [], said: [] };
+    for (const p of list) {
+      if (!['kid', 'mom', 'dad'].includes(p.kind)) continue; // eslint-disable-line no-continue
+      seen.add(p.id);
+      let peer = peers.get(p.id);
+      if (!peer) {
+        const d = peerDesc(p.kind);
+        const g = kit.make(d.look, { name: d.tag, scale: d.scale, tagBg: d.tagBg });
+        g.position.set(p.x, 0, p.z);
+        g.rotation.y = p.ry;
+        scene.add(g);
+        const col = { r: 0.45, ref: g };
+        colliders.push(col);
+        peer = { id: p.id, kind: p.kind, group: g, col, tx: p.x, tz: p.z, tr: p.ry, speed01: 0, say: '', sayAt: 0 };
+        peers.set(p.id, peer);
+        out.joined.push(peer);
+      }
+      peer.tx = p.x;
+      peer.tz = p.z;
+      peer.tr = p.ry;
+      if (p.say && p.sayAt !== peer.sayAt) { peer.say = p.say; peer.sayAt = p.sayAt; out.said.push(peer); }
+    }
+    for (const [id, peer] of peers) {
+      if (seen.has(id)) continue; // eslint-disable-line no-continue
+      scene.remove(peer.group);
+      peer.group.traverse((o) => o.geometry && o.geometry.dispose());
+      const i = colliders.indexOf(peer.col);
+      if (i >= 0) colliders.splice(i, 1);
+      peers.delete(id);
+      out.left.push(peer);
+    }
+    return out;
+  }
+  const swing = (ch, speed01, t) => {
+    const u = ch.userData;
+    const sw = Math.sin(t * 9) * 0.75 * speed01;
+    u.legL.rotation.x = sw;
+    u.legR.rotation.x = -sw;
+    u.armL.rotation.x = -sw * 0.9;
+    u.armR.rotation.x = sw * 0.9;
+    u.body.position.y = Math.abs(Math.sin(t * 9)) * 0.04 * speed01 + Math.sin(t * 1.6) * 0.008;
+  };
+  const humans = [];
+
   return {
-    scene, camera, player, colliders, stops, bunny, drawBoard, npcs: crowd,
-    animatePlayer(speed01, t) {
-      const u = player.userData;
-      const sw = Math.sin(t * 9) * 0.75 * speed01;
-      u.legL.rotation.x = sw;
-      u.legR.rotation.x = -sw;
-      u.armL.rotation.x = -sw * 0.9;
-      u.armR.rotation.x = sw * 0.9;
-      u.body.position.y = Math.abs(Math.sin(t * 9)) * 0.04 * speed01 + Math.sin(t * 1.6) * 0.008;
-    },
+    scene, camera, player, colliders, stops, bunny, drawBoard, npcs: crowd, peers, syncPeers, grade,
+    animatePlayer(speed01, t) { swing(player, speed01, t); },
     animate(t, dt, pos, st) {
-      for (const n of crowd) brain(n, t, dt, pos);
+      humans.length = 0;
+      humans.push(pos);
+      for (const p of peers.values()) {
+        const g = p.group;
+        const dx = p.tx - g.position.x;
+        const dz = p.tz - g.position.z;
+        const dd = Math.hypot(dx, dz);
+        if (dd > 4) g.position.set(p.tx, 0, p.tz);
+        else { g.position.x = damp(g.position.x, p.tx, 9, dt); g.position.z = damp(g.position.z, p.tz, 9, dt); }
+        g.rotation.y += angleDelta(g.rotation.y, p.tr) * (1 - Math.exp(-10 * dt));
+        p.speed01 = damp(p.speed01, clamp(dd * 5, 0, 1), 10, dt);
+        swing(g, p.speed01, t);
+        humans.push(g.position);
+      }
+      for (const n of crowd) brain(n, t, dt, humans);
       // 토끼: 러그 근처를 사뿐사뿐
       const bp = bunny.group.position;
       bunny.wait -= dt;
@@ -1555,6 +1968,22 @@ function buildScene(T, { user, emoji, npcs }) {
       tb.dispose();
     },
   };
+}
+
+// ────────────────────────────────────────────────────────────────
+// 부모님이 3D 를 쓸 수 없는 기기에서 교실에 들어가려 할 때
+function fallbackVisit(root, { finish }, ctl) {
+  root.innerHTML = `
+    <div class="world-card">
+      <div class="world-intro">
+        <div class="wi-emoji">🧊</div>
+        <h2>3D 교실을 열 수 없어요</h2>
+        <p>이 기기에서는 3D 화면을 쓸 수 없어요.<br>다른 기기나 브라우저에서 열어 주세요.</p>
+        <button class="btn btn-yellow" id="fv-back">← 돌아가기</button>
+      </div>
+    </div>`;
+  root.querySelector('#fv-back').onclick = () => finish({ visit: true, stars: 0, seconds: 0, skipped: true });
+  return ctl;
 }
 
 // ────────────────────────────────────────────────────────────────

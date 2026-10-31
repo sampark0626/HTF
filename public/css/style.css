@@ -632,6 +632,30 @@ h1, h2, h3, p { margin: 0; }
   .npc-card { flex-wrap: wrap; }
 }
 
+/* ───────── 우리 반(형 5학년 국화 · 동생 1학년 난초)과 부모님 입장 ───────── */
+.wh-top { flex-wrap: wrap; }
+.wh-who.here { background: #c9f5df; }
+.wi-room { font-size: 1.25rem; background: #fff3c4; border: 3px solid var(--ink); border-radius: 999px; padding: 3px 16px; }
+.wi-parent { background: #ffe3ee; }
+.wh-bubble.say { pointer-events: none; z-index: 2; max-width: 240px; background: #fff7d6; }
+.wh-toast.note { top: calc(110px + env(safe-area-inset-top)); font-size: 1.1rem; background: #fff; }
+.say-card .act-words .btn { flex: 1 1 calc(50% - 8px); }
+.pc-room { opacity: .85; font-size: 1.05rem; }
+.role-card h3 { font-size: 1.6rem; font-weight: 400; }
+.role-status { min-height: 1.5em; opacity: .8; }
+.role-btns { display: grid; gap: 12px; width: 100%; }
+.role-btns .btn.big { width: 100%; }
+.role-btns .btn.pick { outline: 4px solid var(--yellow); outline-offset: 3px; }
+.avatar-row { display: flex; justify-content: center; }
+@media (max-width: 700px) {
+  .wh-top { gap: 6px; }
+  .wh-top .wh-pill { padding: 7px 11px; font-size: 1rem; }
+  .wh-top .wh-btn { min-height: 38px; font-size: 1rem; }
+  .say-card .act-words { flex-direction: column; flex-wrap: nowrap; width: 100%; }
+  .say-card .act-words .btn { flex: none; width: 100%; white-space: nowrap; font-size: .95rem; padding: 6px 10px; min-height: 0; }
+  .wh-toast.note { top: calc(112px + env(safe-area-inset-top)); max-width: calc(100% - 24px); white-space: normal; text-align: center; font-size: 1rem; }
+}
+
 /* ───────── 반응형 ───────── */
 @media (max-width: 900px) {
   .ready { grid-template-columns: 1fr; min-height: 0; }
