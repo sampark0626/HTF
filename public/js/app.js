@@ -448,6 +448,7 @@ function screenHomework() {
         ${avatarHtml(state.user.avatar, { size: 'lg', bob: true })}
         <div><h2>오늘의 Homework ✏️</h2><p>${esc(state.user.name)}, 오늘 할 숙제를 모두 적어 보자!</p></div>
       </div>
+      <div class="hanja-entry" id="hanja" hidden></div>
       <form class="add-row" id="add" autocomplete="off">
         <input id="title" maxlength="60" placeholder="예) 수학 문제집 2쪽" enterkeyhint="done" aria-label="숙제 이름">
         <button class="btn btn-blue" type="submit">➕ 추가</button>
@@ -461,6 +462,63 @@ function screenHomework() {
   const input = $('#title', el);
   const doneBtn = $('#done', el);
   const freqBox = $('#freq', el);
+  const hanjaBox = $('#hanja', el);
+
+  // 한문 6급 입구: 오늘의 5자를 숙제 목록에 넣거나, 바로 공부한다 (손이 불편한 날에도 태블릿으로 할 수 있다)
+  const LEVEL_BTNS = [['8급', '쉬운 8급부터'], ['7급Ⅱ', '7급Ⅱ부터'], ['7급', '7급부터'], ['6급Ⅱ', '6급Ⅱ부터'], ['6급', '6급 새 한자부터']];
+  async function renderHanja() {
+    const h = state.user.hanja;
+    if (!h || !h.enabled) { hanjaBox.hidden = true; return; }
+    let hz;
+    let course;
+    try {
+      hz = await import('./hanja.js');
+      course = await hz.loadCourse();
+    } catch (_) { hanjaBox.hidden = true; return; } // 자료를 못 불러와도 숙제 입력은 그대로 된다
+    if (!app.contains(el)) return;
+    hanjaBox.hidden = false;
+    hanjaBox.classList.toggle('he-done', h.doneToday || h.finished);
+    const queued = state.items.some((i) => i.kind === 'hanja' && i.status === 'pending');
+    if (!h.started) {
+      hanjaBox.innerHTML = `
+        <div class="he-body"><b>📖 한문 6급 도전! 하루 5자</b>
+          <small>태블릿에 획순대로 따라 쓰면서 쉽게 외워요. 손이 불편해도 괜찮아요.</small></div>
+        <div class="he-levels"><small>어디서부터 시작할까요?</small>
+          ${LEVEL_BTNS.map(([, label], i) => `<button class="btn btn-white small" data-hlevel="${i}">${label}</button>`).join('')}</div>`;
+      return;
+    }
+    if (h.finished) {
+      hanjaBox.innerHTML = `
+        <div class="he-body"><b>🏆 한문 6급 300자를 모두 배웠어요!</b><small>이제 복습으로 실력을 지켜요.</small></div>
+        <div class="he-btns"><button class="btn btn-hanja small" data-hgo="replay">🔁 복습 수업</button></div>`;
+      return;
+    }
+    const d = hz.dayOf(course, h.doneToday ? h.day - 1 : h.day);
+    const chars = d.chars.map((c) => `<b>${esc(c.h)}</b>`).join('');
+    if (h.doneToday) {
+      hanjaBox.innerHTML = `
+        <div class="he-chars">${chars}</div>
+        <div class="he-body"><b>🎉 오늘의 한문 5자 끝! (Day ${d.day})</b><small>내일은 Day ${h.day} 가 열려요. 오늘 배운 글자를 한 번 더 복습해 볼까요?</small></div>
+        <div class="he-btns"><button class="btn btn-white small" data-hgo="replay">🔁 복습하기</button></div>`;
+      return;
+    }
+    hanjaBox.innerHTML = `
+      <div class="he-chars">${chars}</div>
+      <div class="he-body"><b>📖 오늘의 한문 5자 · Day ${d.day}</b>
+        <small>${esc(d.title)} · ${esc(d.level)} · ${queued ? '숙제 목록에 들어 있어요. 타이머가 시작되면 "📖 공부하기"를 눌러요' : '숙제로 넣으면 HTF 타이머 안에서 클리어해요'}</small></div>
+      <div class="he-btns">
+        ${queued ? '' : '<button class="btn btn-yellow small" data-hadd="1">➕ 숙제에 넣기</button>'}
+        <button class="btn btn-hanja small" data-hgo="today">✏️ 지금 해볼래요</button>
+      </div>`;
+  }
+  renderHanja();
+
+  async function afterHanja(r) {
+    if (r && r.done && r.saved && r.saved.item) state.items = state.items.filter((i) => i.id !== r.saved.item.id);
+    renderList();
+    renderFreq();
+    renderHanja();
+  }
 
   // 자주 하는 숙제: 지난번들에서 같은 이름으로 2번 이상 적은 숙제를 한 번에 넣는 단축 버튼
   const norm = (s) => s.trim().replace(/\s+/g, ' ').toLowerCase();
@@ -519,6 +577,44 @@ function screenHomework() {
   };
 
   el.addEventListener('click', async (e) => {
+    const lvl = e.target.closest('[data-hlevel]');
+    if (lvl) {
+      sfx.pop();
+      lvl.disabled = true;
+      try {
+        Object.assign(state.user, (await api.hanjaStart(Number(lvl.dataset.hlevel))).user);
+        sfx.success();
+        renderHanja();
+      } catch (err) {
+        lvl.disabled = false;
+        toast(err.message, 'err');
+        sfx.error();
+      }
+      return;
+    }
+    const hadd = e.target.closest('[data-hadd]');
+    if (hadd) {
+      sfx.pop();
+      hadd.disabled = true;
+      try {
+        const { item } = await api.hanjaHomework();
+        if (!state.items.some((i) => i.id === item.id)) state.items.push(item);
+        renderList(item.id);
+        renderHanja();
+      } catch (err) {
+        hadd.disabled = false;
+        toast(err.message, 'err');
+        sfx.error();
+      }
+      return;
+    }
+    const hgo = e.target.closest('[data-hgo]');
+    if (hgo) {
+      sfx.unlock();
+      sfx.pop();
+      afterHanja(await runHanja());
+      return;
+    }
     const quick = e.target.closest('[data-quick]');
     if (quick) {
       addTitle(quick.dataset.quick);
@@ -681,6 +777,7 @@ async function countdownOverlay() {
 const stars = (score) => `<span class="mini-stars">${[1, 2, 3, 4, 5].map((n) => `<span class="${n <= score ? '' : 'off'}">★</span>`).join('')}</span>`;
 
 function verdictInfo(it) {
+  if (it.verdict === 'course') return { cls: 'good', emoji: '📖', label: '한문 수업을 마쳤어요' };
   if (it.aiStatus === 'error') return { cls: 'wait', emoji: '😴', label: 'AI 선생님이 쉬는 중이에요 (사진은 저장됐어요)' };
   if (it.verdict === 'good') return { cls: 'good', emoji: '🌟', label: '성의 있게 했어요' };
   if (it.verdict === 'okay') return { cls: 'okay', emoji: '🙂', label: '보통이에요' };
@@ -743,10 +840,12 @@ function screenRun() {
 
   // 할 일 목록
   const todoCard = (it, i, animate) => `
-    <li class="task ${animate ? 'enter' : ''}" data-id="${it.id}" style="--d:${i * 0.08}s">
+    <li class="task ${it.kind === 'hanja' ? 'hanja' : ''} ${animate ? 'enter' : ''}" data-id="${it.id}" style="--d:${i * 0.08}s">
       <span class="no">${i + 1}</span>
       <div class="t-body"><div class="t-title">${esc(it.title)}</div>${it.carryCount > 0 ? `<span class="carry">${carryLabel(it.carryCount)}</span>` : ''}${parentBadge(it)}</div>
-      <button class="btn btn-mint clear-btn" data-clear="${it.id}" style="--d:${i * 0.4}s">클리어! ✨</button>
+      ${it.kind === 'hanja'
+    ? `<button class="btn btn-hanja clear-btn" data-hanja="${it.id}" style="--d:${i * 0.4}s">📖 공부하기</button>`
+    : `<button class="btn btn-mint clear-btn" data-clear="${it.id}" style="--d:${i * 0.4}s">클리어! ✨</button>`}
     </li>`;
   const doneCard = (it, justId) => {
     const v = verdictInfo(it);
@@ -973,8 +1072,40 @@ function screenRun() {
     }
   }
 
+  // 한문 숙제: 카메라 대신 한문 수업(획 따라 쓰기)을 마치면 클리어된다
+  async function onHanja(id, btn) {
+    if (state.clearing || state.finishing) return;
+    state.clearing = true; // 시간이 끝나도 이 수업만은 마무리할 수 있게 (onClear 와 같은 규칙)
+    sfx.unlock();
+    sfx.pop();
+    sparkle(btn);
+    let justId = null;
+    try {
+      const r = await runHanja();
+      if (!r.done) return;
+      let item = r.saved && r.saved.item;
+      if (!item) { // 서버가 이미 정리해 둔 경우: 목록을 새로 맞춘다
+        try { state.items = (await api.htf()).items; } catch (_) { /* 무시 */ }
+        item = state.items.find((i) => i.id === id && i.status === 'done');
+      } else {
+        state.items = state.items.map((i) => (i.id === item.id ? item : i));
+      }
+      if (item && item.status === 'done') justId = item.id;
+    } finally {
+      state.clearing = false;
+      if (app.contains(el)) {
+        renderTasks({ justId });
+        if (justId) sparkle($(`[data-id="${justId}"]`, tasks));
+      }
+      if (state.timeUp) finishHtf('timeup');
+      else if (justId && state.items.every((i) => i.status === 'done')) finishHtf('allclear');
+    }
+  }
+
   el.addEventListener('click', async (e) => {
     if (e.target.closest('#pause')) { sfx.unlock(); doPause(); return; }
+    const hanjaBtn = e.target.closest('[data-hanja]');
+    if (hanjaBtn) { onHanja(hanjaBtn.dataset.hanja, hanjaBtn); return; }
     const clearBtn = e.target.closest('[data-clear]');
     if (clearBtn) { onClear(clearBtn.dataset.clear, clearBtn); return; }
     if (e.target.closest('#quit')) {
@@ -1053,6 +1184,43 @@ async function finishHtf(reason) {
   state.session = null;
   state.tourReward = null; // 이번 HTF 의 마음 쉼터 보상 (한 번만 저장)
   screenFinish(reason, summary);
+}
+
+// 한문 6급 수업(하루 5자): 오늘의 5자(진도가 한 칸 나아간다) 또는 복습. 끝나면 서버에 기록하고 { done, saved } 를 돌려준다.
+//  - day 를 주면 그날을 복습한다. 오늘 몫을 이미 했거나 60일을 마쳤으면 복습으로 열린다.
+async function runHanja({ day = null } = {}) {
+  let hz;
+  let course;
+  try {
+    hz = await import('./hanja.js');
+    course = await hz.loadCourse();
+  } catch (err) {
+    toast(err.message || '한문 수업을 열지 못했어요', 'err');
+    return { done: false };
+  }
+  const h = state.user.hanja;
+  const today = !day && !h.doneToday && !h.finished;
+  const target = day || (today ? h.day : h.finished ? 1 + Math.floor(Math.random() * h.totalDays) : h.day - 1);
+  const d = hz.dayOf(course, target);
+  let doneDays = new Set();
+  if (today) { // 몸풀기는 실제로 배운 날의 글자로만 낸다
+    try { doneDays = new Set((await api.hanja()).doneDays); } catch (_) { /* 몸풀기 없이 진행 */ }
+  }
+  return hz.openLesson({
+    course,
+    title: `${today ? '' : '🔁 복습 · '}Day ${target} · ${d.title}`,
+    chars: d.chars,
+    review: today ? hz.reviewChars(course, target, doneDays) : [],
+    quiz: true,
+    day: target,
+    confirm: confirmDialog,
+    doneLabel: today ? '🏆 오늘 한문 끝!' : '👍 복습 끝!',
+    save: async (result) => {
+      const r = await api.hanjaComplete({ day: target, score: result.score, misses: result.misses });
+      Object.assign(state.user, r.user);
+      return r;
+    },
+  });
 }
 
 // 마음 쉼터(3D 교실 투어): 필요할 때만 불러온다. 끝나면 onClose({ stars, seconds, skipped })
@@ -1155,6 +1323,7 @@ function screenMyPage() {
       <div class="tabs">
         <button class="tab on" data-tab="info">👤 내 정보</button>
         <button class="tab" data-tab="avatar">🎨 캐릭터</button>
+        ${u.hanja && u.hanja.enabled ? '<button class="tab" data-tab="hanja">📖 한문</button>' : ''}
         <button class="tab" data-tab="rec">📒 숙제 기록</button>
       </div>
       <div id="pane"></div>
@@ -1168,8 +1337,63 @@ function screenMyPage() {
     $$('.tab', el).forEach((b) => b.classList.toggle('on', b === t));
     if (t.dataset.tab === 'info') paneInfo();
     else if (t.dataset.tab === 'avatar') paneAvatar();
+    else if (t.dataset.tab === 'hanja') paneHanja();
     else paneRecords();
   });
+
+  // 한문 6급: 진도와 배운 글자 모음. 배운 글자를 누르면 그 글자만 다시 연습한다.
+  async function paneHanja() {
+    pane.innerHTML = '<p class="empty">불러오는 중<span class="dots"></span></p>';
+    let hz;
+    let course;
+    let status;
+    try {
+      hz = await import('./hanja.js');
+      [course, status] = await Promise.all([hz.loadCourse(), api.hanja()]);
+    } catch (err) {
+      pane.innerHTML = `<p class="empty">${esc(err.message)}</p>`;
+      return;
+    }
+    u.hanja = status.hanja;
+    const h = status.hanja;
+    const done = new Set(status.doneDays); // 실제로 수업을 마친 날 (시작 단계를 건너뛴 날은 빠진다)
+    const learnedCount = done.size * h.perDay;
+    const pct = Math.round((learnedCount / (h.totalDays * h.perDay)) * 100);
+    const dayRow = (d) => `<option value="${d.day}">Day ${d.day} · ${esc(d.title)}</option>`;
+    const grid = course.levels.map((lv) => {
+      const days = course.days.filter((d) => d.day >= lv.startDay && d.day < lv.startDay + lv.days);
+      return `<div class="hz-lv">${esc(lv.key)} · ${lv.days * course.perDay}자</div>
+        <div class="hz-grid">${days.flatMap((d) => d.chars.map((c) => (done.has(d.day)
+    ? `<button class="hz-cell learned" data-char="${esc(c.h)}" title="${esc(c.k)} ${esc(c.s)}">${esc(c.h)}</button>`
+    : '<span class="hz-cell locked">？</span>'))).join('')}</div>`;
+    }).join('');
+    const logs = status.log.map((l) => `<div class="rec"><div class="thumb">📖</div><div class="r-body"><div class="r-title">Day ${l.day}${l.advanced ? '' : ' (복습)'}</div><div class="r-meta">${stars(l.score)}<small>${new Date(l.doneAt).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' })} ${fmtClock(l.doneAt)}</small></div></div></div>`).join('');
+    pane.innerHTML = `
+      <div style="display:grid;gap:14px;width:100%">
+        <div class="card hz-prog">
+          <h2>📖 한문 6급 · 하루 5자</h2>
+          <div>${h.finished ? '🏆 60일 코스를 모두 마쳤어요!' : `다음은 <b>Day ${h.day}</b> · ${esc(hz.dayOf(course, h.day).title)}`} · 배운 글자 <b>${learnedCount}</b> / ${h.totalDays * h.perDay}</div>
+          <div class="hz-bar"><i style="width:${pct}%"></i></div>
+          ${done.size ? `<div class="chips"><select id="rp" aria-label="복습할 날">${course.days.filter((d) => done.has(d.day)).map(dayRow).join('')}</select><button class="btn btn-hanja small" id="rp-go">🔁 복습 수업</button></div>` : '<small>아직 마친 수업이 없어요. 숙제 화면에서 오늘의 한문을 시작해 봐요!</small>'}
+        </div>
+        <div class="card"><h3>배운 글자 <small>(눌러서 연습)</small></h3>${grid}</div>
+        ${logs ? `<div class="card"><h3>최근 기록</h3><div style="display:grid;gap:10px;margin-top:8px">${logs}</div></div>` : ''}
+      </div>`;
+    pane.onclick = async (e) => {
+      const cell = e.target.closest('[data-char]');
+      if (cell) {
+        sfx.tap();
+        const ch = hz.allChars(course).find((c) => c.h === cell.dataset.char);
+        if (ch) await hz.openCharPractice({ course, char: ch, confirm: confirmDialog });
+        return;
+      }
+      if (e.target.closest('#rp-go')) {
+        sfx.pop();
+        await runHanja({ day: Number($('#rp', pane).value) });
+        paneHanja();
+      }
+    };
+  }
 
   function paneAvatar() {
     pane.innerHTML = `
@@ -1377,7 +1601,7 @@ async function screenParent() {
         ${avatarHtml(k.avatar, { size: 'lg' })}
         <div>
           <h3>${esc(k.name)}${k.room && k.room.who ? ` <span class="chipv">${esc(k.room.who)}</span>` : ''}</h3>
-          <p class="pc-room">🏫 ${esc(k.room ? k.room.label : '')}</p>
+          <p class="pc-room">🏫 ${esc(k.room ? k.room.label : '')}${k.hanja && k.hanja.enabled ? ` · 📖 한문 ${k.hanja.finished ? '완주' : `Day ${k.hanja.day}`}` : ''}</p>
           <p>${k.registered
     ? `${esc(k.school)} ${esc(k.className)}<br>클리어 ${k.done}개 · 남은 숙제 ${k.pending}개 · 사진 ${k.photos}장${k.needsPin ? ' · 🔑 새 비밀번호 대기 중' : ''}`
     : '아직 등록 전이에요'}</p>
@@ -1386,6 +1610,7 @@ async function screenParent() {
       <div class="pc-actions">
         <button class="btn btn-mint small" data-act="visit">👪 교실에 같이 들어가기</button>
         ${k.registered ? '<button class="btn btn-blue small" data-act="homework">📝 숙제 보기·편집</button>' : ''}
+        ${k.registered ? '<button class="btn btn-hanja small" data-act="hanja">📖 한문 설정</button>' : ''}
         <button class="btn btn-yellow small" data-act="classroom">🏫 교실 친구·선생님</button>
         ${k.registered ? `
           <button class="btn btn-white small" data-act="clear-records">🧹 기록만 지우기</button>
@@ -1407,6 +1632,7 @@ async function screenParent() {
     sfx.tap();
     const name = btn.closest('.parent-card').dataset.name;
     if (btn.dataset.act === 'homework') { screenParentHomework(name); return; }
+    if (btn.dataset.act === 'hanja') { screenParentHanja(name); return; }
     if (btn.dataset.act === 'classroom') { screenParentClassroom(name); return; }
     if (btn.dataset.act === 'visit') { enterClassroom(name, screenParent); return; }
     const a = PARENT_ACTIONS[btn.dataset.act];
@@ -1655,6 +1881,73 @@ async function screenParentHomework(name) {
   });
 }
 
+// 부모님이 한 아이의 한문 6급 과정을 켜고 끄고, 몇 번째 날부터 할지 정한다
+async function screenParentHanja(name) {
+  setTopbar('none');
+  let hz;
+  let course;
+  let info;
+  try {
+    hz = await import('./hanja.js');
+    [course, info] = await Promise.all([hz.loadCourse(), api.adminHanja(name)]);
+  } catch (err) {
+    toast(err.message, 'err');
+    if (err.status === 401) screenParentLogin(); else screenParent();
+    return;
+  }
+  const h = info.hanja;
+  const LV = ['8급', '7급Ⅱ', '7급', '6급Ⅱ', '6급 새 한자'];
+  const nowDay = Math.min(h.day, h.totalDays);
+  const dayNote = h.finished ? '60일을 모두 마쳤어요 🏆' : `다음에 공부할 날: Day ${h.day} · ${esc(hz.dayOf(course, h.day).title)} (${esc(hz.dayOf(course, h.day).level)})`;
+  const logs = info.log.map((l) => `<div class="rec"><div class="thumb">📖</div><div class="r-body"><div class="r-title">Day ${l.day}${l.advanced ? '' : ' (복습)'}</div><div class="r-meta">${stars(l.score)}<small>실수 ${l.misses}번 · ${new Date(l.doneAt).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' })} ${fmtClock(l.doneAt)}</small></div></div></div>`).join('');
+  const el = mount(`
+    <div class="my">
+      <button class="back-link" id="back">← 부모님 메뉴</button>
+      <h2 style="font-size:1.9rem">📖 ${esc(name)}의 한문 6급</h2>
+      <p class="sub">한국어문회 6급 배정한자 300자를 하루 5자씩 60일 동안 익혀요. 아이는 숙제 화면에서 "오늘의 한문"을 숙제로 넣고, 태블릿에 획순대로 따라 쓰며 외워요.</p>
+      <div class="card" style="display:grid;gap:12px">
+        <div><b>${h.enabled ? '✅ 켜져 있어요' : '⏸️ 꺼져 있어요'}</b> <small>${info.defaultOn ? '(기본값: 켜짐)' : '(기본값: 꺼짐)'}</small></div>
+        <div class="pc-actions">
+          <button class="btn ${h.enabled ? 'btn-white' : 'btn-mint'} small" data-set="${h.enabled ? 'off' : 'on'}">${h.enabled ? '⏸️ 끄기' : '▶️ 켜기'}</button>
+          <button class="btn btn-white small" data-set="default">↩️ 기본값으로</button>
+        </div>
+      </div>
+      <div class="card" style="display:grid;gap:12px">
+        <div>${dayNote}<br><small>수업을 마친 날 ${info.doneDays.length}일 · 배운 글자 ${info.doneDays.length * h.perDay} / ${h.totalDays * h.perDay} · 오늘 ${h.doneToday ? '이미 끝냈어요' : '아직이에요'}</small></div>
+        <div class="hz-bar"><i style="width:${Math.round((info.doneDays.length / h.totalDays) * 100)}%"></i></div>
+        <div class="chips"><small>이 단계부터 시작</small>${h.levelStarts.map((d, i) => `<button class="btn btn-white small" data-day="${d}">${LV[i]}</button>`).join('')}</div>
+        <div class="chips"><small>날짜 바꾸기</small>
+          <button class="btn btn-white small" data-day="${Math.max(1, h.day - 1)}">◀ 하루 전</button>
+          <b>Day ${nowDay}</b>
+          <button class="btn btn-white small" data-day="${Math.min(h.totalDays + 1, h.day + 1)}">하루 뒤 ▶</button>
+          ${h.doneToday ? '<button class="btn btn-yellow small" data-reopen="1">🔓 오늘 몫 다시 열기</button>' : ''}
+        </div>
+      </div>
+      ${logs ? `<div class="card"><h3>최근 수업 기록</h3><div style="display:grid;gap:10px;margin-top:8px">${logs}</div></div>` : ''}
+    </div>`);
+  $('#back', el).onclick = () => { sfx.tap(); screenParent(); };
+  el.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-set],[data-day],[data-reopen]');
+    if (!b) return;
+    sfx.tap();
+    const body = {};
+    if (b.dataset.set) body.enabled = { on: true, off: false, default: null }[b.dataset.set];
+    if (b.dataset.day) body.day = Number(b.dataset.day);
+    if (b.dataset.reopen) body.reopenToday = true;
+    b.disabled = true;
+    try {
+      await api.adminSetHanja(name, body);
+      sfx.success();
+      state.config = await api.config();
+      screenParentHanja(name);
+    } catch (err) {
+      b.disabled = false;
+      toast(err.message, 'err');
+      sfx.error();
+    }
+  });
+}
+
 // 엄마·아빠 캐릭터로 아이의 교실에 같이 들어간다. 아이가 그때 쉼터에 있으면 서로 보인다.
 const ROLE_KEY = 'htf_parent_role';
 function chooseParentRole(name, room) {
@@ -1863,5 +2156,5 @@ async function boot() {
 }
 
 // 개발·점검용: localStorage.htf_debug = '1' 이면 화면을 직접 불러 볼 수 있다 (world.js 의 점검용 훅과 같은 방식)
-try { if (localStorage.getItem('htf_debug') === '1') window.__htfApp = { state, screenFinish, screenParent }; } catch (_) { /* 무시 */ }
+try { if (localStorage.getItem('htf_debug') === '1') window.__htfApp = { state, screenFinish, screenParent, screenHomework, screenRun, screenMyPage, runHanja }; } catch (_) { /* 무시 */ }
 boot();
