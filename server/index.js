@@ -566,6 +566,15 @@ async function main() {
     res.json({ ok: true });
   });
 
+  // 부모님은 두 아이의 숙제 사진을 볼 수 있다 (사진 번호는 추측할 수 없는 무작위 값)
+  admin.get('/photos/:id', async (req, res) => {
+    const [p] = await db.query('SELECT mime, data FROM photos WHERE id = $1', [req.params.id]);
+    if (!p) throw new HttpError(404, '사진을 찾을 수 없어요');
+    res.set('Content-Type', p.mime);
+    res.set('Cache-Control', 'private, max-age=3600');
+    res.send(p.data);
+  });
+
   app.use('/api/admin', admin);
   app.use('/api', api);
   app.use('/api', (req, res) => res.status(404).json({ error: '없는 주소예요' }));

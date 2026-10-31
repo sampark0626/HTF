@@ -82,12 +82,17 @@ export const api = {
 // 사진은 로그인 토큰이 있어야 볼 수 있어서, 헤더를 붙여 받아온 뒤 blob URL 로 보여 준다.
 const photoCache = new Map();
 
-export async function photoUrl(id) {
-  if (photoCache.has(id)) return photoCache.get(id);
-  const res = await fetch(`/api/photos/${id}`, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+// asAdmin: 부모님 메뉴에서 볼 때는 부모님 토큰으로, 아이 계정과 상관없이 본다
+export async function photoUrl(id, asAdmin = false) {
+  const key = asAdmin ? `admin:${id}` : id;
+  if (photoCache.has(key)) return photoCache.get(key);
+  const bearer = asAdmin ? adminToken : token;
+  const res = await fetch(asAdmin ? `/api/admin/photos/${id}` : `/api/photos/${id}`, {
+    headers: bearer ? { authorization: `Bearer ${bearer}` } : {},
+  });
   if (!res.ok) throw new ApiError('사진을 불러오지 못했어요', res.status);
   const url = URL.createObjectURL(await res.blob());
-  photoCache.set(id, url);
+  photoCache.set(key, url);
   return url;
 }
 

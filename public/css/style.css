@@ -410,6 +410,15 @@ h1, h2, h3, p { margin: 0; }
 }
 .ph-edit:focus { box-shadow: 0 0 0 4px rgba(79, 124, 255, .35); }
 .rec .r-title .carry { font-size: .85rem; }
+.rec.viewable { cursor: pointer; transition: transform .12s, box-shadow .12s; }
+.rec.viewable:hover { transform: translateY(-2px); box-shadow: 0 5px 0 var(--ink); }
+.rec.viewable:focus-visible { outline: 4px solid rgba(79, 124, 255, .5); outline-offset: 2px; }
+.rec .view-hint { opacity: .6; }
+.viewer-card { width: min(760px, 100%); }
+.viewer-title { margin: 0; font-size: 1.5rem; font-weight: 400; word-break: break-word; }
+.viewer-photo { width: 100%; max-height: 62vh; object-fit: contain; background: #f4f6fb; border: var(--line); border-radius: 18px; }
+.viewer-card .r-meta { justify-content: center; }
+.viewer-card .r-note { opacity: .75; }
 
 /* ───────── 모달 / 오버레이 ───────── */
 .modal-back { position: fixed; inset: 0; z-index: 120; background: rgba(43, 45, 66, .6); display: grid; place-items: center; padding: 16px; animation: fade .2s ease both; }

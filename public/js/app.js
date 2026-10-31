@@ -95,7 +95,7 @@ function confirmDialog({ title, text = '', yes = '네', no = '아니요' }) {
 
 async function hydratePhotos(root) {
   await Promise.all($$('img[data-photo]', root).map(async (img) => {
-    try { img.src = await photoUrl(img.dataset.photo); } catch (_) { img.replaceWith(Object.assign(document.createElement('span'), { textContent: '🖼️' })); }
+    try { img.src = await photoUrl(img.dataset.photo, img.dataset.admin === '1'); } catch (_) { img.replaceWith(Object.assign(document.createElement('span'), { textContent: '🖼️' })); }
   }));
 }
 
@@ -1251,7 +1251,40 @@ async function screenParent() {
   });
 }
 
-// 부모님이 한 아이의 숙제를 보고 고친다: 빼먹은 숙제 넣기, 이름 고치기, 지우기
+// 숙제 사진 크게 보기 (부모님용): 사진 + 아이가 보여 준 것 + AI 판독 결과
+const SHOWN_LABEL = { homework: '숙제 결과물', face: '얼굴', v_sign: 'V 포즈', nothing: '잘 안 보임', other: '다른 물건' };
+
+function showPhotoViewer(item) {
+  const v = verdictInfo(item);
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `
+    <div class="card ovl-card viewer-card" role="dialog" aria-modal="true" aria-label="${esc(item.title)}">
+      <h3 class="viewer-title">${esc(item.title)}</h3>
+      ${item.photoId
+    ? `<img class="viewer-photo" data-photo="${item.photoId}" data-admin="1" alt="${esc(item.title)} 사진">`
+    : '<p class="empty">사진 없이 클리어했어요.</p>'}
+      <div class="r-meta">
+        <span class="chipv ${v.cls}">${v.emoji} ${esc(v.label)}</span>
+        ${item.score ? stars(item.score) : ''}
+        ${item.shown ? `<span class="chipv">📷 ${esc(SHOWN_LABEL[item.shown] || item.shown)}</span>` : ''}
+        <small>${new Date(item.doneAt).toLocaleString('ko-KR', { month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</small>
+      </div>
+      ${item.aiComment ? `<p class="ai-comment">${esc(item.aiComment)}</p>` : ''}
+      ${item.aiNote ? `<p class="r-note">👪 AI 메모: ${esc(item.aiNote)}</p>` : ''}
+      <button class="btn btn-blue" data-close>닫기</button>
+    </div>`;
+  document.body.appendChild(ov);
+  hydratePhotos(ov);
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  function close() { document.removeEventListener('keydown', onKey); ov.remove(); }
+  document.addEventListener('keydown', onKey);
+  ov.addEventListener('click', (e) => {
+    if (e.target === ov || e.target.closest('[data-close]')) { sfx.tap(); close(); }
+  });
+}
+
+// 부모님이 한 아이의 숙제를 보고 고친다: 빼먹은 숙제 넣기, 이름 고치기, 지우기, 클리어 사진 보기
 async function screenParentHomework(name) {
   setTopbar('none');
   let data;
@@ -1281,7 +1314,7 @@ async function screenParentHomework(name) {
       <div class="chips" id="freq" hidden></div>
       <div class="rec-day">⏳ 아직 안 한 숙제 (아이 화면에 그대로 보여요)</div>
       <ul class="hw-list" id="list"></ul>
-      <div class="rec-day">✔ 클리어한 숙제 (최근 30개 · 보기만 가능)</div>
+      <div class="rec-day">✔ 클리어한 숙제와 사진 (최근 30개 · 보기만 가능)</div>
       <div id="done" style="display:grid;gap:10px"></div>
     </div>`);
   const list = $('#list', el);
@@ -1327,23 +1360,32 @@ async function screenParentHomework(name) {
     renderFreq();
   }
 
+  // 클리어한 숙제: 날짜별로 사진 썸네일과 AI 결과를 보여 주고, 누르면 사진을 크게 본다
   function renderDone() {
-    const fmt = (ms) => new Date(ms).toLocaleString('ko-KR', { month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-    $('#done', el).innerHTML = data.done.length
-      ? data.done.map((it) => {
-        const v = verdictInfo(it);
-        return `
-          <div class="rec">
-            <div class="thumb">✔</div>
-            <div class="r-body">
-              <div class="r-title">${esc(it.title)}${parentBadge(it)}</div>
-              <div class="r-meta"><span class="chipv ${v.cls}">${v.emoji} ${esc(v.label)}</span>${it.score ? stars(it.score) : ''}<small>${fmt(it.doneAt)}</small></div>
-              ${it.aiComment ? `<div class="r-comment">💬 ${esc(it.aiComment)}</div>` : ''}
-              ${it.aiNote ? `<div class="r-note">👪 AI 메모: ${esc(it.aiNote)}</div>` : ''}
-            </div>
-          </div>`;
-      }).join('')
-      : '<p class="empty">아직 클리어한 숙제가 없어요.</p>';
+    const box = $('#done', el);
+    if (!data.done.length) {
+      box.innerHTML = '<p class="empty">아직 클리어한 숙제가 없어요.</p>';
+      return;
+    }
+    const dayOf = (ms) => new Date(ms).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric', weekday: 'short' });
+    let day = '';
+    box.innerHTML = data.done.map((it) => {
+      const d = dayOf(it.doneAt);
+      const header = d !== day ? `<div class="rec-day">📅 ${d}</div>` : '';
+      day = d;
+      const v = verdictInfo(it);
+      return `${header}
+        <div class="rec viewable" data-view="${it.id}" tabindex="0" role="button" aria-label="${esc(it.title)} 크게 보기">
+          ${it.photoId ? `<img class="thumb" data-photo="${it.photoId}" data-admin="1" alt="">` : '<div class="thumb">📝</div>'}
+          <div class="r-body">
+            <div class="r-title">${esc(it.title)}${parentBadge(it)}</div>
+            <div class="r-meta"><span class="chipv ${v.cls}">${v.emoji} ${esc(v.label)}</span>${it.score ? stars(it.score) : ''}<small>${fmtClock(it.doneAt)}</small></div>
+            ${it.aiComment ? `<div class="r-comment">💬 ${esc(it.aiComment)}</div>` : ''}
+            ${it.photoId ? '<small class="view-hint">🔍 눌러서 크게 보기</small>' : '<small class="view-hint">사진 없이 클리어했어요</small>'}
+          </div>
+        </div>`;
+    }).join('');
+    hydratePhotos(box);
   }
 
   let busy = false;
@@ -1401,7 +1443,18 @@ async function screenParentHomework(name) {
     else if (e.key === 'Escape') { editingId = null; renderPending(); }
   });
 
+  const openViewer = (card) => {
+    const item = data.done.find((d) => d.id === card.dataset.view);
+    if (item) { sfx.tap(); showPhotoViewer(item); }
+  };
+  $('#done', el).addEventListener('keydown', (e) => {
+    const card = e.target.closest('[data-view]');
+    if (card && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openViewer(card); }
+  });
+
   el.addEventListener('click', async (e) => {
+    const view = e.target.closest('[data-view]');
+    if (view) { openViewer(view); return; }
     const quick = e.target.closest('[data-quick]');
     if (quick) { addTitle(quick.dataset.quick); return; }
     const edit = e.target.closest('[data-edit]');
