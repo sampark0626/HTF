@@ -59,9 +59,10 @@ h1, h2, h3, p { margin: 0; }
 /* ───────── 레이아웃 ───────── */
 #topbar {
   position: sticky; top: 0; z-index: 20;
-  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
   padding: calc(10px + env(safe-area-inset-top)) 16px 10px;
 }
+#topbar .who b, #topbar .pill-btn { white-space: nowrap; }
 #topbar .who, #topbar .bar-actions {
   display: flex; align-items: center; gap: 8px;
   background: #fff; border: 3px solid var(--ink); border-radius: 999px; padding: 4px 8px 4px 6px;
@@ -188,7 +189,7 @@ h1, h2, h3, p { margin: 0; }
 .form-card .sub { text-align: center; opacity: .75; }
 
 /* ───────── 오늘의 Homework ───────── */
-.hw { display: grid; gap: 16px; width: min(760px, 100%); margin: 0 auto; }
+.hw { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; width: min(760px, 100%); margin: 0 auto; } /* 칸이 입력창 기본 너비보다 좁아져도 화면 밖으로 넘치지 않게 */
 .hw-head { display: flex; align-items: center; gap: 14px; }
 .hw-head h2 { font-size: 2.1rem; }
 .hw-head p { opacity: .75; }
@@ -725,6 +726,10 @@ body.hz-open { overflow: hidden; }
 .hz-opt {
   min-height: 74px; font-size: 1.6rem; background: #fff; border: var(--line); border-radius: 20px; box-shadow: var(--shadow-s); cursor: pointer; padding: 6px 10px; transition: transform .1s;
 }
+.hz-qword { font-size: min(18vw, 4.6rem); padding: 10px 30px; }
+.hz-opts.short, .hz-opts.long { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.hz-opts.long .hz-opt { font-size: 1.25rem; min-height: 84px; }
+.hz-endbtns { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
 .hz-opts.han .hz-opt span { font-size: 3.2rem; line-height: 1.1; font-family: 'Noto Serif KR', 'Batang', 'Songti SC', 'Noto Serif CJK KR', serif; }
 .hz-opt:active { transform: translateY(2px); box-shadow: 0 1px 0 var(--ink); }
 .hz-opt.right { background: #c9f5df; animation: pop-in .35s ease both; }
@@ -775,6 +780,36 @@ body.hz-open { overflow: hidden; }
   .he-btns .btn { flex: 1; }
 }
 
+/* 시험 대비 카드: D-day 와 오늘 할 일 */
+.hanja-exam { grid-template-columns: auto 1fr auto; background: linear-gradient(135deg, #ffe0ea, #fff4c9); }
+.hanja-exam.he-done { background: linear-gradient(135deg, #d6f7e8, #fff4c9); }
+.he-dday { display: grid; place-items: center; background: #ff6b6b; color: #fff; border: 3px solid var(--ink); border-radius: 18px; padding: 6px 14px; box-shadow: 0 3px 0 var(--ink); }
+.he-dday b { font-size: 2rem; font-weight: 400; line-height: 1.1; }
+.he-dday small { font-size: .85rem; }
+@media (max-width: 760px) {
+  .hanja-exam { grid-template-columns: auto 1fr; }
+  .hanja-exam .he-chars { grid-column: 1 / -1; justify-content: center; }
+}
+@media (max-width: 560px) {
+  .hanja-exam { grid-template-columns: 1fr; justify-items: center; text-align: center; }
+  .hanja-exam .he-btns { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
+  .hanja-exam .he-btns .btn { white-space: nowrap; padding-inline: 8px; }
+}
+.hz-pick { width: min(640px, 100%); max-height: 92dvh; grid-template-rows: auto auto minmax(0, 1fr) auto; }
+.hz-pick .row .btn { white-space: nowrap; }
+.hz-picked { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; align-items: center; min-height: 58px; }
+.hz-picked .hz-chip { padding: 2px 8px; min-width: 0; border-radius: 12px; box-shadow: 0 2px 0 var(--ink); }
+.hz-picked .hz-chip b { font-size: 1.6rem; }
+.hz-picked .hz-chip small { font-size: .7rem; }
+.hz-pickgrid { overflow-y: auto; min-height: 0; text-align: left; padding: 2px 4px 8px; }
+.hz-pickgrid .hz-grid { grid-template-columns: repeat(auto-fill, minmax(46px, 1fr)); gap: 6px; }
+.hz-pickgrid .hz-cell { font-size: 1.5rem; border-radius: 12px; }
+.hz-cell.on { background: #ffd166; transform: translateY(2px); box-shadow: 0 1px 0 var(--ink); }
+.hz-choices { display: grid; gap: 10px; }
+.hz-choices .btn { display: grid; gap: 2px; padding: 12px 16px; }
+.hz-choices .btn small { font-size: .85rem; opacity: .75; }
+.modal h3 small { display: block; font-size: 1rem; opacity: .7; margin-top: 2px; }
+
 /* 마이페이지 · 한문 기록 */
 .hz-prog { display: grid; gap: 8px; }
 .hz-bar { height: 22px; border: 3px solid var(--ink); border-radius: 999px; background: #fff; overflow: hidden; }
@@ -785,6 +820,7 @@ body.hz-open { overflow: hidden; }
   font-family: 'Noto Serif KR', 'Batang', 'Songti SC', 'Noto Serif CJK KR', serif; box-shadow: 0 3px 0 var(--ink);
 }
 .hz-cell.learned { background: #fff7d6; }
+.hz-cell.weak { background: #ffe0e0; }
 .hz-cell.locked { color: #b7b9c8; cursor: default; box-shadow: none; font-size: 1.2rem; }
 .hz-lv { font-size: 1.15rem; margin: 12px 0 6px 4px; opacity: .8; }
 

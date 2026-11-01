@@ -70,18 +70,57 @@ function speak(text) {
 }
 
 // ───────── 퀴즈 문제 만들기 ─────────
+// 한 문제 = { c(글자), type, prompt(HTML), optClass, options:[{id, html}], answer(id), explain(틀렸을 때 보여 줄 HTML) }
+//  meaning 한자 → 뜻·소리 / hanja 뜻·소리 → 한자 / reading 한자어 → 소리(독음) / wordmean 한자어 → 뜻
 const label = (c) => `${c.k} ${c.s}`;
-function makeQuestions(chars, pool) {
-  return shuffle(chars).map((c, i) => {
-    const type = i % 2 === 0 ? 'meaning' : 'hanja'; // 한자를 보고 훈음 고르기 / 훈음을 보고 한자 고르기
+const textOpt = (id, text) => ({ id, html: esc(text) });
+const pickOne = (arr) => arr[Math.floor(Math.random() * arr.length)];
+function makeQuestion(c, type, pool) {
+  const tip = `<small>💡 ${esc(c.m)}</small>`;
+  if (type === 'meaning' || type === 'hanja') {
     const wrong = [];
     for (const d of shuffle(pool)) {
       if (wrong.length >= 3) break;
       if (d.h === c.h || label(d) === label(c) || wrong.some((w) => label(w) === label(d))) continue; // eslint-disable-line no-continue
       wrong.push(d);
     }
-    return { c, type, options: shuffle([c, ...wrong]) };
-  });
+    const opts = shuffle([c, ...wrong]);
+    const explain = `<b>${esc(c.h)} ${esc(label(c))}</b> 이에요${tip}`;
+    return type === 'meaning'
+      ? { c, type, prompt: `<div class="hz-qbig">${esc(c.h)}</div><p>이 글자의 <b>뜻과 소리</b>는?</p>`, optClass: '', options: opts.map((o) => textOpt(o.h, label(o))), answer: c.h, explain }
+      : { c, type, prompt: `<div class="hz-qtext">${esc(label(c))}</div><p>이 <b>뜻과 소리</b>의 한자는?</p>`, optClass: 'han', options: opts.map((o) => ({ id: o.h, html: `<span>${esc(o.h)}</span>` })), answer: c.h, explain };
+  }
+  // 한자어 문제: 그 글자가 들어간 낱말을 하나 골라 소리나 뜻을 묻는다
+  const [word, read, mean] = pickOne(c.w);
+  const at = type === 'reading' ? 1 : 2;
+  const rightText = at === 1 ? read : mean;
+  const wrong = [];
+  for (const d of shuffle(pool)) {
+    if (wrong.length >= 3) break;
+    if (d.h === c.h) continue; // eslint-disable-line no-continue
+    const w = pickOne(d.w);
+    if (w[at] === rightText || wrong.some((x) => x === w[at])) continue; // eslint-disable-line no-continue
+    wrong.push(w[at]);
+  }
+  const opts = shuffle([rightText, ...wrong]);
+  const explain = `<b>${esc(word)}</b> = ${esc(read)} · ${esc(mean)}${tip}`;
+  const prompt = at === 1
+    ? `<div class="hz-qbig hz-qword">${esc(word)}</div><p>이 한자어의 <b>소리(독음)</b>는?</p>`
+    : `<div class="hz-qbig hz-qword">${esc(word)}</div><p><small>${esc(read)}</small> 이 한자어의 <b>뜻</b>은?</p>`;
+  return { c, type, prompt, optClass: type === 'reading' ? 'short' : 'long', options: opts.map((o) => textOpt(o, o)), answer: rightText, explain };
+}
+function makeQuestions(chars, pool) {
+  return shuffle(chars).map((c, i) => makeQuestion(c, i % 2 === 0 ? 'meaning' : 'hanja', pool)); // 한자를 보고 훈음 고르기 / 훈음을 보고 한자 고르기
+}
+
+// 모의시험 문제: 300자 전체에서 고르되, 약한 글자(weak)를 먼저 넣는다. 독음 문제를 가장 많이 낸다.
+export function makeExamQuestions(course, { count = 20, weak = [] } = {}) {
+  const all = allChars(course);
+  const byH = new Map(all.map((c) => [c.h, c]));
+  const take = shuffle(weak.map((h) => byH.get(h)).filter(Boolean)).slice(0, Math.floor(count * 0.4));
+  const rest = shuffle(all.filter((c) => !take.includes(c))).slice(0, count - take.length);
+  const types = ['reading', 'meaning', 'hanja', 'reading', 'wordmean'];
+  return shuffle([...take, ...rest]).map((c, i) => makeQuestion(c, types[i % types.length], all));
 }
 
 // ───────── 수업 화면 ─────────
@@ -89,7 +128,8 @@ function makeQuestions(chars, pool) {
 //   chars    이번에 배울 글자들 (보통 하루 5자)       review  몸풀기 퀴즈용 글자들(없으면 건너뜀)
 //   quiz     마지막 퀴즈를 낼지                       save    async (result) => 저장 (실패하면 던진다)
 //   confirm  async ({title,text,yes,no}) => boolean   doneLabel 마지막 버튼 글자
-export async function openLesson({ course, title, chars, review = [], quiz = true, day = 0, save = null, confirm, doneLabel = '🏆 끝났어요!' }) {
+//   exam     { questions, note, sub } 를 주면 글자 수업 대신 모의시험이 된다. 끝나면 { done, result, saved, next } (next 가 'weak' 면 약한 글자 수업으로 이어 가자는 뜻)
+export async function openLesson({ course, title, chars, review = [], quiz = true, day = 0, save = null, confirm, doneLabel = '🏆 끝났어요!', exam = null }) {
   document.body.classList.add('hz-open');
   const root = document.createElement('div');
   root.className = 'hz';
@@ -118,9 +158,13 @@ export async function openLesson({ course, title, chars, review = [], quiz = tru
 
   const pool = allChars(course);
   const steps = [];
-  if (review.length) steps.push({ id: 'review', dot: '🔥' });
-  chars.forEach((c, i) => steps.push({ id: `c${i}`, dot: String(i + 1) }));
-  if (quiz) steps.push({ id: 'quiz', dot: '❓' });
+  if (exam) {
+    steps.push({ id: 'exam', dot: '📝' });
+  } else {
+    if (review.length) steps.push({ id: 'review', dot: '🔥' });
+    chars.forEach((c, i) => steps.push({ id: `c${i}`, dot: String(i + 1) }));
+    if (quiz) steps.push({ id: 'quiz', dot: '❓' });
+  }
   const setStep = (id) => {
     const at = steps.findIndex((s) => s.id === id);
     stepsEl.innerHTML = steps.map((s, i) => `<span class="${i < at ? 'done' : i === at ? 'now' : ''}">${s.dot}</span>`).join('');
@@ -144,6 +188,7 @@ export async function openLesson({ course, title, chars, review = [], quiz = tru
 
   const totals = { misses: 0, quizRight: 0, quizTotal: 0 };
   const charStars = [];
+  const asked = new Map(); // 글자 → 퀴즈에서 처음에 맞혔는지 (약한 글자 기록)
 
   // ── 글씨판: 획순 애니메이션 / 따라쓰기 ──
   function makeBoard(boardEl, ch, opts = {}) {
@@ -312,6 +357,7 @@ export async function openLesson({ course, title, chars, review = [], quiz = tru
     const stars = skipped ? 1 : solo.misses === 0 && trace.misses <= 1 ? 3 : solo.misses <= 2 ? 2 : 1;
     totals.misses += misses;
     charStars.push(stars);
+    if (skipped) asked.set(c.h, false); // 획 연습을 건너뛴 글자는 아직 약한 글자
     confetti({ count: 40 + stars * 20, y: 0.5, emojis: ['⭐', '✨'] });
     phase.innerHTML = `<span>🎉 ${esc(c.h)} 완성!</span><i>${stars3(stars)}</i>`;
     await wait(
@@ -322,26 +368,24 @@ export async function openLesson({ course, title, chars, review = [], quiz = tru
     return stars;
   }
 
-  // ── 퀴즈 (몸풀기와 마무리가 같은 틀) ──
-  async function runQuiz({ id, heading, sub, questions, count = true }) {
+  // ── 퀴즈 (몸풀기·마무리·모의시험이 같은 틀) ──
+  //  single: 틀려도 다시 내지 않는다 (모의시험)
+  async function runQuiz({ id, heading, sub, questions, count = true, single = false }) {
     setStep(id);
-    let queue = questions.slice();
+    const queue = questions.slice();
     let n = 0;
-    const asked = questions.length;
+    const total = questions.length;
     const retry = new Set();
     let right = 0;
     while (queue.length && !closed) {
       const q = queue.shift();
       n += 1;
-      const prompt = q.type === 'meaning'
-        ? `<div class="hz-qbig">${esc(q.c.h)}</div><p>이 글자의 <b>뜻과 소리</b>는?</p>`
-        : `<div class="hz-qtext">${esc(label(q.c))}</div><p>이 <b>뜻과 소리</b>의 한자는?</p>`;
       main.innerHTML = `
         <div class="hz-quiz">
-          <div class="hz-qhead"><b>${esc(heading)}</b><small>${esc(sub)}</small><span>${Math.min(n, asked + retry.size)} / ${asked + retry.size}</span></div>
-          ${prompt}
-          <div class="hz-opts ${q.type === 'hanja' ? 'han' : ''}">
-            ${q.options.map((o, i) => `<button class="hz-opt" data-i="${i}">${q.type === 'meaning' ? esc(label(o)) : `<span>${esc(o.h)}</span>`}</button>`).join('')}
+          <div class="hz-qhead"><b>${esc(heading)}</b><small>${esc(sub)}</small><span>${Math.min(n, total + retry.size)} / ${total + retry.size}</span></div>
+          ${q.prompt}
+          <div class="hz-opts ${q.optClass}">
+            ${q.options.map((o, i) => `<button class="hz-opt" data-i="${i}">${o.html}</button>`).join('')}
           </div>
           <div class="hz-fb" id="hz-fb" aria-live="polite"></div>
         </div>`;
@@ -352,8 +396,7 @@ export async function openLesson({ course, title, chars, review = [], quiz = tru
           const b = e.target.closest('.hz-opt');
           if (!b || locked || closed) return;
           locked = true;
-          const pick = q.options[Number(b.dataset.i)];
-          const good = pick.h === q.c.h;
+          const good = q.options[Number(b.dataset.i)].id === q.answer;
           const fb = main.querySelector('#hz-fb');
           b.classList.add(good ? 'right' : 'wrong');
           if (good) {
@@ -361,24 +404,39 @@ export async function openLesson({ course, title, chars, review = [], quiz = tru
             fb.innerHTML = '⭕ 맞아요!';
           } else {
             sfx.error();
-            main.querySelectorAll('.hz-opt').forEach((x) => { if (q.options[Number(x.dataset.i)].h === q.c.h) x.classList.add('right'); });
-            fb.innerHTML = `❌ 정답은 <b>${esc(q.c.h)} ${esc(label(q.c))}</b> 이에요<small>💡 ${esc(q.c.m)}</small>`;
+            main.querySelectorAll('.hz-opt').forEach((x) => { if (q.options[Number(x.dataset.i)].id === q.answer) x.classList.add('right'); });
+            fb.innerHTML = `❌ 정답은 ${q.explain}`;
           }
           await sleep(good ? 650 : 2200);
           resolve(good);
         };
       });
       if (closed) return null;
-      if (ok) { if (!retry.has(q.c.h)) right += 1; } else if (!retry.has(q.c.h)) { retry.add(q.c.h); queue.push({ ...q, options: shuffle(q.options) }); }
+      const first = !retry.has(q.c.h);
+      if (first) asked.set(q.c.h, (asked.has(q.c.h) ? asked.get(q.c.h) : true) && ok); // 처음에 맞혔는지 (약한 글자 기록용)
+      if (ok) { if (first) right += 1; } else if (first && !single) { retry.add(q.c.h); queue.push({ ...q, options: shuffle(q.options) }); }
     }
-    if (count) { totals.quizRight += right; totals.quizTotal += asked; }
+    if (count) { totals.quizRight += right; totals.quizTotal += total; }
     return right;
   }
 
   // ── 시작 ──
   const intro = () => new Promise((resolve) => {
     stepsEl.innerHTML = steps.map((s) => `<span>${s.dot}</span>`).join('');
-    main.innerHTML = `
+    main.innerHTML = exam
+      ? `
+      <div class="hz-intro">
+        <h2>${esc(title)}</h2>
+        <p class="hz-note">${esc(exam.note)}</p>
+        <ol class="hz-plan">
+          <li>🔤 <b>한자어 소리(독음)</b> 와 <b>한자어 뜻</b></li>
+          <li>👀 한자를 보고 <b>뜻과 소리</b> 고르기</li>
+          <li>✏️ 뜻과 소리를 보고 <b>한자</b> 고르기</li>
+        </ol>
+        <p class="hz-note">틀려도 괜찮아요. 틀린 글자는 따로 모아서 다시 연습해요.</p>
+        <button class="btn btn-yellow big" id="hz-go">📝 시작해요</button>
+      </div>`
+      : `
       <div class="hz-intro">
         <h2>${esc(title)}</h2>
         <div class="hz-chips">${chars.map((c) => `<div class="hz-chip"><b>${esc(c.h)}</b><small>${esc(label(c))}</small></div>`).join('')}</div>
@@ -394,12 +452,37 @@ export async function openLesson({ course, title, chars, review = [], quiz = tru
     main.querySelector('#hz-go').onclick = () => { sfx.go(); resolve(); };
   });
 
+  // 저장 버튼과 안내 글을 맡는 공통 부분: 저장이 끝날 때까지 버튼을 잠그고, 실패하면 다시 저장할 수 있다.
+  function saver(result, lockEls) {
+    const note = main.querySelector('#hz-save');
+    let saved = null;
+    const trySave = async () => {
+      if (!save) return true;
+      note.innerHTML = '기록을 저장하는 중<span class="dots"></span>';
+      lockEls.forEach((b) => { b.disabled = true; });
+      try {
+        saved = await save(result);
+        note.textContent = '✅ 기록을 저장했어요';
+        lockEls.forEach((b) => { b.disabled = false; });
+        return true;
+      } catch (err) {
+        note.innerHTML = `😢 ${esc(err.message || '저장하지 못했어요')} <button class="btn btn-white small" id="hz-retry">다시 저장</button>`;
+        main.querySelector('#hz-retry').onclick = () => { sfx.tap(); trySave(); };
+        return false;
+      }
+    };
+    return { trySave, get saved() { return saved; } };
+  }
+
+  // 글자별로 맞았는지: 퀴즈에서 처음 맞혔는지, 획 연습을 건너뛰지 않았는지
+  const charResults = () => [...asked].map(([h, ok]) => ({ h, ok }));
+
   // ── 끝 화면: 별점과 저장 ──
   async function finishView() {
     const avg = charStars.length ? charStars.reduce((a, b) => a + b, 0) / charStars.length : 2; // 1~3
     const quizPts = totals.quizTotal ? (totals.quizRight / totals.quizTotal) * 2 : 1; // 0~2
     const score = Math.min(5, Math.max(1, Math.round(avg + quizPts)));
-    const result = { day, score, misses: totals.misses, charStars: charStars.slice(), quizRight: totals.quizRight, quizTotal: totals.quizTotal };
+    const result = { day, score, misses: totals.misses, charStars: charStars.slice(), quizRight: totals.quizRight, quizTotal: totals.quizTotal, results: charResults() };
     sfx.success();
     confetti({ count: 140, y: 0.55, emojis: ['⭐', '📖', '✨', '🎉'] });
     main.innerHTML = `
@@ -413,30 +496,55 @@ export async function openLesson({ course, title, chars, review = [], quiz = tru
         <button class="btn btn-mint big" id="hz-fin" ${save ? 'disabled' : ''}>${esc(doneLabel)}</button>
       </div>`;
     const fin = main.querySelector('#hz-fin');
-    const note = main.querySelector('#hz-save');
-    let saved = null;
-    const trySave = async () => {
-      if (!save) return true;
-      note.innerHTML = '기록을 저장하는 중<span class="dots"></span>';
-      fin.disabled = true;
-      try {
-        saved = await save(result);
-        note.textContent = '✅ 기록을 저장했어요';
-        fin.disabled = false;
-        return true;
-      } catch (err) {
-        note.innerHTML = `😢 ${esc(err.message || '저장하지 못했어요')} <button class="btn btn-white small" id="hz-retry">다시 저장</button>`;
-        main.querySelector('#hz-retry').onclick = () => { sfx.tap(); trySave(); };
-        return false;
-      }
-    };
-    await trySave();
-    fin.onclick = () => { sfx.tap(); closeAll({ done: true, result, saved }); };
+    const sv = saver(result, [fin]);
+    await sv.trySave();
+    fin.onclick = () => { sfx.tap(); closeAll({ done: true, result, saved: sv.saved }); };
+  }
+
+  // ── 모의시험 끝 화면: 점수, 틀린 글자, 저장. 틀린 글자가 있으면 바로 약한 글자 수업으로 이어 갈 수 있다. ──
+  async function examFinishView() {
+    const results = charResults();
+    const total = results.length;
+    const right = results.filter((r) => r.ok).length;
+    const pct = total ? Math.round((right / total) * 100) : 0;
+    const score = Math.min(5, Math.max(1, Math.round((right / Math.max(1, total)) * 5)));
+    const result = { mode: 'exam', right, total, pct, score, misses: total - right, results };
+    const byH = new Map(pool.map((c) => [c.h, c]));
+    const wrong = results.filter((r) => !r.ok).map((r) => byH.get(r.h)).filter(Boolean);
+    sfx.success();
+    confetti({ count: pct >= 80 ? 160 : 70, y: 0.55, emojis: ['⭐', '📝', '✨'] });
+    main.innerHTML = `
+      <div class="hz-done">
+        <div class="hz-trophy">${pct >= 80 ? '🏆' : pct >= 50 ? '👏' : '💪'}</div>
+        <h2>모의시험 끝!</h2>
+        <div class="hz-score">${'★'.repeat(score)}<span>${'★'.repeat(5 - score)}</span></div>
+        <p><b>${right} / ${total}</b> 정답 · ${pct}점</p>
+        ${wrong.length
+    ? `<p>다시 볼 글자 ${wrong.length}개</p><div class="hz-chips">${wrong.map((c) => `<div class="hz-chip"><b>${esc(c.h)}</b><small>${esc(label(c))}</small></div>`).join('')}</div>`
+    : '<p>🎉 모두 맞혔어요! 정말 대단해요!</p>'}
+        <p class="hz-save" id="hz-save">${save ? '기록을 저장하는 중<span class="dots"></span>' : ''}</p>
+        <div class="hz-endbtns">
+          ${wrong.length ? '<button class="btn btn-yellow big" id="hz-weak" disabled>🎯 틀린 글자 수업 ▶</button>' : ''}
+          <button class="btn btn-mint big" id="hz-fin" ${save ? 'disabled' : ''}>${esc(doneLabel)}</button>
+        </div>
+      </div>`;
+    const fin = main.querySelector('#hz-fin');
+    const weakBtn = main.querySelector('#hz-weak');
+    const sv = saver(result, weakBtn ? [fin, weakBtn] : [fin]);
+    await sv.trySave();
+    fin.onclick = () => { sfx.tap(); closeAll({ done: true, result, saved: sv.saved }); };
+    if (weakBtn) weakBtn.onclick = () => { sfx.go(); closeAll({ done: true, result, saved: sv.saved, next: 'weak' }); };
   }
 
   // ── 순서대로 진행 ──
   (async () => {
     await intro();
+    if (exam) {
+      await runQuiz({ id: 'exam', heading: '📝 모의시험', sub: exam.sub, questions: exam.questions, single: true });
+      if (closed) return;
+      await examFinishView();
+      return;
+    }
     if (review.length) {
       const poolForReview = pool.filter((p) => !review.some((r) => r.h === p.h));
       await runQuiz({ id: 'review', heading: '🔥 몸풀기', sub: '지난번에 배운 글자, 기억나요?', questions: makeQuestions(review, [...review, ...poolForReview]), count: false });

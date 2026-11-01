@@ -23,6 +23,11 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS tour_stars INTEGER NOT NULL DEFAULT 0
 ALTER TABLE users ADD COLUMN IF NOT EXISTS hanja_on INTEGER;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS hanja_day INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS hanja_last TEXT NOT NULL DEFAULT '';
+-- 시험 대비: hanja_exam 은 시험 날짜(NULL 이면 기본값, '' 이면 시험 없음) / hanja_cnt 는 hanja_last 날에 나아간 수업 수 /
+-- hanja_alt 는 약한 글자 수업이나 모의시험으로 오늘의 한문을 끝낸 날
+ALTER TABLE users ADD COLUMN IF NOT EXISTS hanja_exam TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS hanja_cnt INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS hanja_alt TEXT NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -62,7 +67,19 @@ CREATE TABLE IF NOT EXISTS hanja_log (
   misses INTEGER NOT NULL DEFAULT 0,
   advanced INTEGER NOT NULL DEFAULT 0
 );
+ALTER TABLE hanja_log ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'lesson'; -- lesson 수업 / weak 약한 글자 수업 / mock 모의시험
+ALTER TABLE hanja_log ADD COLUMN IF NOT EXISTS total INTEGER NOT NULL DEFAULT 0; -- 모의시험 문제 수, 약한 글자 수업의 글자 수
 CREATE INDEX IF NOT EXISTS hanja_log_user_idx ON hanja_log(user_id, done_at);
+-- 글자마다 맞고 틀린 기록: 틀린 뒤 연속 2번 맞히기 전까지는 "약한 글자"
+CREATE TABLE IF NOT EXISTS hanja_char (
+  user_id TEXT NOT NULL,
+  h TEXT NOT NULL,
+  ok_n INTEGER NOT NULL DEFAULT 0,
+  bad_n INTEGER NOT NULL DEFAULT 0,
+  streak INTEGER NOT NULL DEFAULT 0,
+  last_at BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (user_id, h)
+);
 CREATE TABLE IF NOT EXISTS photos (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -94,6 +111,7 @@ ALTER TABLE photos ENABLE ROW LEVEL SECURITY;
 ALTER TABLE meta ENABLE ROW LEVEL SECURITY;
 ALTER TABLE npcs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hanja_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hanja_char ENABLE ROW LEVEL SECURITY;
 `;
 
 function normalize(rows) {

@@ -474,7 +474,7 @@ async function main() {
     res.json({ item: publicItem(fresh) });
   });
 
-  // ───────── 한문 6급 과정 (하루 5자 × 60일) ─────────
+  // ───────── 한문 6급 과정 (하루 5자 × 60일) + 시험 대비 (약한 글자·모의시험) ─────────
   const hanjaOn = (user) => {
     if (!hanjaLib.enabledFor(user)) throw new HttpError(403, '한문 과정이 아직 켜지지 않았어요');
   };
@@ -482,15 +482,59 @@ async function main() {
     'SELECT * FROM hanja_log WHERE user_id = $1 ORDER BY done_at DESC LIMIT $2',
     [userId, limit]
   );
-  const publicLog = (l) => ({ day: l.day, doneAt: l.done_at, score: l.score, misses: l.misses, advanced: l.advanced === 1 });
+  const publicLog = (l) => ({ kind: l.kind || 'lesson', day: l.day, total: l.total || 0, doneAt: l.done_at, score: l.score, misses: l.misses, advanced: l.advanced === 1 });
   // 실제로 수업을 마친 날들 (시작 단계를 건너뛴 날은 들어가지 않는다)
   const hanjaDoneDays = async (userId) => (
-    await db.query('SELECT DISTINCT day FROM hanja_log WHERE user_id = $1 ORDER BY day ASC', [userId])
+    await db.query("SELECT DISTINCT day FROM hanja_log WHERE user_id = $1 AND kind = 'lesson' ORDER BY day ASC", [userId])
   ).map((r) => r.day);
   const pendingHanjaItems = (userId) => db.query(
     "SELECT * FROM homework WHERE user_id = $1 AND kind = 'hanja' AND status = 'pending' ORDER BY created_at ASC",
     [userId]
   );
+
+  // 글자별 결과 [{ h, ok }]: 배정한자 300자만 받고, 한 글자가 여러 번 나오면 하나라도 틀렸으면 틀린 것으로 본다
+  const parseResults = (raw) => {
+    if (!Array.isArray(raw)) return [];
+    const m = new Map();
+    for (const r of raw.slice(0, hanjaLib.MAX_RESULTS)) {
+      const h = r && typeof r.h === 'string' ? r.h : '';
+      if (hanjaLib.CHARS.has(h)) m.set(h, (m.has(h) ? m.get(h) : true) && r.ok === true);
+    }
+    return [...m].map(([h, ok]) => ({ h, ok }));
+  };
+  const applyResults = async (userId, results, now) => {
+    for (const r of results) {
+      // eslint-disable-next-line no-await-in-loop
+      await db.query(
+        `INSERT INTO hanja_char (user_id, h, ok_n, bad_n, streak, last_at) VALUES ($1, $2, $3, $4, $3, $5)
+         ON CONFLICT (user_id, h) DO UPDATE SET ok_n = hanja_char.ok_n + EXCLUDED.ok_n, bad_n = hanja_char.bad_n + EXCLUDED.bad_n,
+           streak = CASE WHEN EXCLUDED.streak > 0 THEN hanja_char.streak + 1 ELSE 0 END, last_at = EXCLUDED.last_at`,
+        [userId, r.h, r.ok ? 1 : 0, r.ok ? 0 : 1, now]
+      );
+    }
+  };
+  // 약한 글자: 틀린 적이 있고 아직 연속 2번 맞히지 못한 글자 (많이 틀린 것, 오래된 것부터)
+  const weakChars = async (userId, limit = 30) => (await db.query(
+    'SELECT h FROM hanja_char WHERE user_id = $1 AND bad_n > 0 AND streak < 2 ORDER BY streak ASC, bad_n DESC, last_at ASC LIMIT $2',
+    [userId, limit]
+  )).map((r) => r.h);
+  const askedCount = async (userId) => Number((await db.query('SELECT COUNT(*) AS n FROM hanja_char WHERE user_id = $1', [userId]))[0].n);
+  // 기다리던 한문 숙제를 클리어한다 (수업·약한 글자 수업·모의시험 어느 것이든 오늘의 한문이 된다)
+  const finishHanjaHomework = async (u, now, score, comment) => {
+    const session = await openSession(u.id);
+    let item = null;
+    for (const p of await pendingHanjaItems(u.id)) {
+      // eslint-disable-next-line no-await-in-loop
+      await db.query(
+        `UPDATE homework SET status = 'done', done_at = $1, done_session = $2, verdict = 'course', score = $3,
+           ai_comment = $4, ai_status = 'none' WHERE id = $5`,
+        [now, session ? session.id : null, score, comment, p.id]
+      );
+      // eslint-disable-next-line no-await-in-loop
+      if (!item) [item] = await db.query('SELECT * FROM homework WHERE id = $1', [p.id]);
+    }
+    return item;
+  };
 
   api.get('/hanja', async (req, res) => {
     const [pending] = await pendingHanjaItems(req.user.id);
@@ -499,6 +543,8 @@ async function main() {
       doneDays: await hanjaDoneDays(req.user.id),
       log: (await hanjaLog(req.user.id, 14)).map(publicLog),
       pending: pending ? publicItem(pending) : null,
+      weak: await weakChars(req.user.id),
+      asked: await askedCount(req.user.id),
     });
   });
 
@@ -513,7 +559,7 @@ async function main() {
     const id = uid();
     await db.query(
       "INSERT INTO homework (id, user_id, title, created_at, kind) VALUES ($1, $2, $3, $4, 'hanja')",
-      [id, req.user.id, hanjaLib.HOMEWORK_TITLE, Date.now()]
+      [id, req.user.id, hanjaLib.homeworkTitle(req.user), Date.now()]
     );
     const [h] = await db.query('SELECT * FROM homework WHERE id = $1', [id]);
     res.json({ item: publicItem(h), existing: false });
@@ -530,8 +576,8 @@ async function main() {
     res.json({ user: publicUser(fresh) });
   });
 
-  // 하루 5자 수업을 마쳤을 때: 진도를 한 칸 나아가고(하루 한 번), 기다리던 한문 숙제를 클리어한다.
-  // 이미 배운 날(복습)은 기록만 남기고 진도는 그대로다.
+  // 하루 5자 수업을 마쳤을 때: 진도를 한 칸 나아가고(하루 한 번, 시험 대비 중에는 오늘 목표 수업 수만큼), 기다리던 한문 숙제를 클리어한다.
+  // 이미 배운 날(복습)은 기록만 남기고 진도는 그대로다. 글자별 결과(results)가 오면 약한 글자 기록에 반영한다.
   api.post('/hanja/complete', async (req, res) => {
     hanjaOn(req.user);
     const u = req.user;
@@ -542,29 +588,63 @@ async function main() {
     const score = Math.min(5, Math.max(1, Math.round(Number(req.body.score)) || 3));
     const misses = Math.min(999, Math.max(0, Math.round(Number(req.body.misses)) || 0));
     const advance = day === st.day && !st.finished;
-    if (advance && st.doneToday) throw new HttpError(409, '오늘의 한문은 벌써 끝냈어요 🎉');
+    if (advance && !st.canAdvance) throw new HttpError(409, '오늘의 수업은 벌써 다 했어요 🎉');
     const now = Date.now();
     await db.query(
       'INSERT INTO hanja_log (id, user_id, day, done_at, score, misses, advanced) VALUES ($1, $2, $3, $4, $5, $6, $7)',
       [uid(), u.id, day, now, score, misses, advance ? 1 : 0]
     );
+    await applyResults(u.id, parseResults(req.body.results), now);
     if (advance) {
-      await db.query('UPDATE users SET hanja_day = $1, hanja_last = $2, updated_at = $3 WHERE id = $4', [day + 1, hanjaLib.kstDate(now), now, u.id]);
-    }
-    const session = await openSession(u.id);
-    let item = null;
-    for (const p of await pendingHanjaItems(u.id)) {
-      // eslint-disable-next-line no-await-in-loop
       await db.query(
-        `UPDATE homework SET status = 'done', done_at = $1, done_session = $2, verdict = 'course', score = $3,
-           ai_comment = $4, ai_status = 'none' WHERE id = $5`,
-        [now, session ? session.id : null, score, `Day ${day} 한문 5자를 배우고 획까지 써 봤어요!`, p.id]
+        'UPDATE users SET hanja_day = $1, hanja_last = $2, hanja_cnt = $3, updated_at = $4 WHERE id = $5',
+        [day + 1, hanjaLib.kstDate(now), st.advToday + 1, now, u.id]
       );
-      // eslint-disable-next-line no-await-in-loop
-      if (!item) [item] = await db.query('SELECT * FROM homework WHERE id = $1', [p.id]);
     }
+    const item = await finishHanjaHomework(u, now, score, `Day ${day} 한문 5자를 배우고 획까지 써 봤어요!`);
     const [fresh] = await db.query('SELECT * FROM users WHERE id = $1', [u.id]);
     res.json({ user: publicUser(fresh), item: item ? publicItem(item) : null, advanced: advance });
+  });
+
+  // 약한 글자 수업(또는 교재에서 고른 글자 수업, kind 'book')을 마쳤을 때: 기록만 남기고(진도는 그대로), 한문 숙제를 클리어한다. 오늘의 한문으로 쳐 준다.
+  api.post('/hanja/weak', async (req, res) => {
+    hanjaOn(req.user);
+    const u = req.user;
+    const results = parseResults(req.body.results);
+    if (!results.length) throw new HttpError(400, '글자 결과가 없어요');
+    const kind = req.body.kind === 'book' ? 'book' : 'weak';
+    const score = Math.min(5, Math.max(1, Math.round(Number(req.body.score)) || 3));
+    const misses = Math.min(999, Math.max(0, Math.round(Number(req.body.misses)) || 0));
+    const now = Date.now();
+    await db.query(
+      'INSERT INTO hanja_log (id, user_id, day, done_at, score, misses, advanced, kind, total) VALUES ($1, $2, 0, $3, $4, $5, 0, $7, $6)',
+      [uid(), u.id, now, score, misses, results.length, kind]
+    );
+    await applyResults(u.id, results, now);
+    await db.query('UPDATE users SET hanja_alt = $1, updated_at = $2 WHERE id = $3', [hanjaLib.kstDate(now), now, u.id]);
+    const item = await finishHanjaHomework(u, now, score, kind === 'book' ? '교재에서 배운 글자를 태블릿으로 써 봤어요! 📚' : '약한 글자를 다시 익혔어요! 🎯');
+    const [fresh] = await db.query('SELECT * FROM users WHERE id = $1', [u.id]);
+    res.json({ user: publicUser(fresh), item: item ? publicItem(item) : null, weak: await weakChars(u.id) });
+  });
+
+  // 모의시험을 마쳤을 때: 문제마다 맞았는지(results)를 받아 점수를 매기고 약한 글자를 갱신한다. 오늘의 한문으로 쳐 준다.
+  api.post('/hanja/mock', async (req, res) => {
+    hanjaOn(req.user);
+    const u = req.user;
+    const results = parseResults(req.body.results);
+    if (results.length < 5) throw new HttpError(400, '문제를 더 풀어 주세요');
+    const right = results.filter((r) => r.ok).length;
+    const score = Math.min(5, Math.max(1, Math.round((right / results.length) * 5)));
+    const now = Date.now();
+    await db.query(
+      "INSERT INTO hanja_log (id, user_id, day, done_at, score, misses, advanced, kind, total) VALUES ($1, $2, 0, $3, $4, $5, 0, 'mock', $6)",
+      [uid(), u.id, now, score, results.length - right, results.length]
+    );
+    await applyResults(u.id, results, now);
+    await db.query('UPDATE users SET hanja_alt = $1, updated_at = $2 WHERE id = $3', [hanjaLib.kstDate(now), now, u.id]);
+    const item = await finishHanjaHomework(u, now, score, `모의시험 ${results.length}문제 중 ${right}문제를 맞혔어요! 📝`);
+    const [fresh] = await db.query('SELECT * FROM users WHERE id = $1', [u.id]);
+    res.json({ user: publicUser(fresh), item: item ? publicItem(item) : null, right, total: results.length, weak: await weakChars(u.id) });
   });
 
   api.get('/records', async (req, res) => {
@@ -781,6 +861,10 @@ async function main() {
       defaultOn: hanjaLib.DEFAULT_KIDS.includes(u.name),
       doneDays: await hanjaDoneDays(u.id),
       log: (await hanjaLog(u.id, 20)).map(publicLog),
+      weak: await weakChars(u.id),
+      asked: await askedCount(u.id),
+      examDefault: hanjaLib.DEFAULT_KIDS.includes(u.name) ? hanjaLib.DEFAULT_EXAM : '',
+      examSet: u.hanja_exam === null || u.hanja_exam === undefined ? 'default' : u.hanja_exam ? 'date' : 'none',
     });
   });
 
@@ -796,8 +880,18 @@ async function main() {
       day = Math.round(Number(b.day));
       if (!(day >= 1 && day <= hanjaLib.TOTAL_DAYS + 1)) throw new HttpError(400, `날짜는 1~${hanjaLib.TOTAL_DAYS + 1} 사이예요`);
     }
-    const last = b.reopenToday ? '' : u.hanja_last; // 오늘 몫을 다시 열어 준다
-    await db.query('UPDATE users SET hanja_on = $1, hanja_day = $2, hanja_last = $3, updated_at = $4 WHERE id = $5', [on, day, last, Date.now(), u.id]);
+    // 시험 날짜: 'YYYY-MM-DD' 로 정하고, '' 이면 시험 없음, null 이면 기본값으로 되돌린다
+    let exam = u.hanja_exam === undefined ? null : u.hanja_exam;
+    if (b.exam !== undefined) {
+      if (b.exam === null || b.exam === '') exam = b.exam;
+      else if (hanjaLib.validDate(b.exam)) exam = b.exam;
+      else throw new HttpError(400, '시험 날짜를 올바르게 적어 주세요');
+    }
+    const reopen = Boolean(b.reopenToday); // 오늘 몫을 다시 열어 준다
+    await db.query(
+      'UPDATE users SET hanja_on = $1, hanja_day = $2, hanja_last = $3, hanja_cnt = $4, hanja_alt = $5, hanja_exam = $6, updated_at = $7 WHERE id = $8',
+      [on, day, reopen ? '' : u.hanja_last, reopen ? 0 : u.hanja_cnt, reopen ? '' : u.hanja_alt, exam, Date.now(), u.id]
+    );
     const [fresh] = await db.query('SELECT * FROM users WHERE id = $1', [u.id]);
     res.json({ hanja: hanjaLib.publicHanja(fresh) });
   });

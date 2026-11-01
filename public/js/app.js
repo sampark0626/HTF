@@ -448,6 +448,7 @@ function screenHomework() {
         ${avatarHtml(state.user.avatar, { size: 'lg', bob: true })}
         <div><h2>오늘의 Homework ✏️</h2><p>${esc(state.user.name)}, 오늘 할 숙제를 모두 적어 보자!</p></div>
       </div>
+      <div class="hanja-entry hanja-exam" id="hanja-exam" hidden></div>
       <div class="hanja-entry" id="hanja" hidden></div>
       <form class="add-row" id="add" autocomplete="off">
         <input id="title" maxlength="60" placeholder="예) 수학 문제집 2쪽" enterkeyhint="done" aria-label="숙제 이름">
@@ -463,27 +464,59 @@ function screenHomework() {
   const doneBtn = $('#done', el);
   const freqBox = $('#freq', el);
   const hanjaBox = $('#hanja', el);
+  const examBox = $('#hanja-exam', el);
 
   // 한문 6급 입구: 오늘의 5자를 숙제 목록에 넣거나, 바로 공부한다 (손이 불편한 날에도 태블릿으로 할 수 있다)
   const LEVEL_BTNS = [['8급', '쉬운 8급부터'], ['7급Ⅱ', '7급Ⅱ부터'], ['7급', '7급부터'], ['6급Ⅱ', '6급Ⅱ부터'], ['6급', '6급 새 한자부터']];
   async function renderHanja() {
     const h = state.user.hanja;
-    if (!h || !h.enabled) { hanjaBox.hidden = true; return; }
+    if (!h || !h.enabled) { hanjaBox.hidden = true; examBox.hidden = true; return; }
     let hz;
     let course;
     try {
       hz = await import('./hanja.js');
       course = await hz.loadCourse();
-    } catch (_) { hanjaBox.hidden = true; return; } // 자료를 못 불러와도 숙제 입력은 그대로 된다
+    } catch (_) { hanjaBox.hidden = true; examBox.hidden = true; return; } // 자료를 못 불러와도 숙제 입력은 그대로 된다
     if (!app.contains(el)) return;
+    const queued = state.items.some((i) => i.kind === 'hanja' && i.status === 'pending');
+
+    // 시험 대비 카드: 남은 날, 오늘 할 일(모의시험 · 약한 글자 수업 · 순서대로 수업)
+    const ex = h.exam;
+    if (ex) {
+      let weakN = 0;
+      try { weakN = (await api.hanja()).weak.length; } catch (_) { /* 약한 글자 수는 없어도 된다 */ }
+      if (!app.contains(el)) return;
+      const next = h.canAdvance && h.started ? hz.dayOf(course, h.day) : null;
+      const plan = ex.phase === 'study' ? `오늘의 목표: 순서대로 수업 ${h.goal}개 + 모의시험 1번`
+        : ex.phase === 'final' ? '마무리 3일! 모의시험으로 약한 글자를 잡아요'
+          : '오늘이 시험날! 모의시험으로 가볍게 몸을 풀고 자신 있게 가요 💪';
+      examBox.hidden = false;
+      examBox.classList.toggle('he-done', h.doneToday);
+      examBox.innerHTML = `
+        <div class="he-dday"><b>${ddayText(ex)}</b><small>${monthDay(ex.date)} 시험</small></div>
+        <div class="he-body"><b>🎯 한자능력검정 6급 시험 준비${h.doneToday ? ' · 오늘의 한문 ✅' : ''}</b>
+          <small>${plan}${queued ? ' · 숙제 목록에 들어 있어요' : ''}</small></div>
+        ${next ? `<div class="he-chars">${next.chars.map((c) => `<b>${esc(c.h)}</b>`).join('')}</div>` : ''}
+        <div class="he-btns">
+          ${queued || h.doneToday ? '' : '<button class="btn btn-yellow small" data-hadd="1">➕ 숙제에 넣기</button>'}
+          <button class="btn btn-hanja small" data-hgo="mock">📝 모의시험</button>
+          ${weakN ? `<button class="btn btn-hanja small" data-hgo="weak">🎯 약한 글자 ${weakN}개</button>` : ''}
+          ${next ? `<button class="btn btn-white small" data-hgo="today">📖 순서대로 ${h.advToday}/${h.goal}</button>` : ''}
+          <button class="btn btn-white small" data-hgo="book">📚 교재 글자</button>
+        </div>`;
+    } else {
+      examBox.hidden = true;
+    }
+    // 이미 시작했다면 시험 대비 카드가 순서대로 수업까지 맡는다
+    if (ex && h.started) { hanjaBox.hidden = true; return; }
+
     hanjaBox.hidden = false;
     hanjaBox.classList.toggle('he-done', h.doneToday || h.finished);
-    const queued = state.items.some((i) => i.kind === 'hanja' && i.status === 'pending');
     if (!h.started) {
       hanjaBox.innerHTML = `
         <div class="he-body"><b>📖 한문 6급 도전! 하루 5자</b>
           <small>태블릿에 획순대로 따라 쓰면서 쉽게 외워요. 손이 불편해도 괜찮아요.</small></div>
-        <div class="he-levels"><small>어디서부터 시작할까요?</small>
+        <div class="he-levels"><small>${ex ? '교재에서 이미 배운 단계는 건너뛰어도 돼요. 모의시험이 약한 글자를 찾아 줘요. ' : ''}어디서부터 시작할까요?</small>
           ${LEVEL_BTNS.map(([, label], i) => `<button class="btn btn-white small" data-hlevel="${i}">${label}</button>`).join('')}</div>`;
       return;
     }
@@ -493,9 +526,9 @@ function screenHomework() {
         <div class="he-btns"><button class="btn btn-hanja small" data-hgo="replay">🔁 복습 수업</button></div>`;
       return;
     }
-    const d = hz.dayOf(course, h.doneToday ? h.day - 1 : h.day);
+    const d = hz.dayOf(course, !h.canAdvance ? h.day - 1 : h.day);
     const chars = d.chars.map((c) => `<b>${esc(c.h)}</b>`).join('');
-    if (h.doneToday) {
+    if (!h.canAdvance) {
       hanjaBox.innerHTML = `
         <div class="he-chars">${chars}</div>
         <div class="he-body"><b>🎉 오늘의 한문 5자 끝! (Day ${d.day})</b><small>내일은 Day ${h.day} 가 열려요. 오늘 배운 글자를 한 번 더 복습해 볼까요?</small></div>
@@ -612,7 +645,7 @@ function screenHomework() {
     if (hgo) {
       sfx.unlock();
       sfx.pop();
-      afterHanja(await runHanja());
+      afterHanja(await runHanja({ mode: hgo.dataset.hgo }));
       return;
     }
     const quick = e.target.closest('[data-quick]');
@@ -774,6 +807,11 @@ async function countdownOverlay() {
 }
 
 // ───────────────────────── 5. HTF 진행 (타이머) ─────────────────────────
+// 한문 기록의 이름: 수업(Day N) / 약한 글자 수업 / 모의시험
+const hanjaLogIcon = (l) => ({ mock: '📝', weak: '🎯', book: '📚' }[l.kind] || '📖');
+const hanjaLogLabel = (l) => (l.kind === 'book' ? `📚 교재 수업 (${l.total}자)` : l.kind === 'mock' ? `📝 모의시험 ${l.total - l.misses} / ${l.total}` : l.kind === 'weak' ? `🎯 약한 글자 수업 (${l.total}자)` : `Day ${l.day}${l.advanced ? '' : ' (복습)'}`);
+const ddayText = (ex) => (ex.dday === 0 ? 'D-day' : `D-${ex.dday}`);
+const monthDay = (iso) => `${Number(iso.slice(5, 7))}월 ${Number(iso.slice(8, 10))}일`;
 const stars = (score) => `<span class="mini-stars">${[1, 2, 3, 4, 5].map((n) => `<span class="${n <= score ? '' : 'off'}">★</span>`).join('')}</span>`;
 
 function verdictInfo(it) {
@@ -1081,7 +1119,12 @@ function screenRun() {
     sparkle(btn);
     let justId = null;
     try {
-      const r = await runHanja();
+      let mode = 'auto';
+      if (state.user.hanja && state.user.hanja.exam) {
+        mode = await chooseHanjaMode();
+        if (!mode) return;
+      }
+      const r = await runHanja({ mode });
       if (!r.done) return;
       let item = r.saved && r.saved.item;
       if (!item) { // 서버가 이미 정리해 둔 경우: 목록을 새로 맞춘다
@@ -1186,21 +1229,176 @@ async function finishHtf(reason) {
   screenFinish(reason, summary);
 }
 
-// 한문 6급 수업(하루 5자): 오늘의 5자(진도가 한 칸 나아간다) 또는 복습. 끝나면 서버에 기록하고 { done, saved } 를 돌려준다.
-//  - day 를 주면 그날을 복습한다. 오늘 몫을 이미 했거나 60일을 마쳤으면 복습으로 열린다.
-async function runHanja({ day = null } = {}) {
-  let hz;
-  let course;
+// 한문 6급 수업. 끝나면 서버에 기록하고 { done, saved } 를 돌려준다. mode:
+//  today  순서대로 오늘의 수업(진도가 나아간다). 오늘 몫을 다 했거나 60일을 마쳤으면 복습으로 열린다.   replay  이미 배운 날 복습 (day 로 날을 고른다)
+//  weak   약한 글자 수업(시험 대비): 틀렸던 글자 최대 5자                                           mock  모의시험 20문제
+//  book   교재에서 오늘 배우는 글자를 직접 골라(최대 5자) 같은 글자로 수업
+//  auto   (기본) today 와 같다
+async function loadHanja() {
   try {
-    hz = await import('./hanja.js');
-    course = await hz.loadCourse();
+    const hz = await import('./hanja.js');
+    return { hz, course: await hz.loadCourse() };
   } catch (err) {
     toast(err.message || '한문 수업을 열지 못했어요', 'err');
+    return null;
+  }
+}
+
+// 시험 대비 중 "오늘은 뭘 할까요?" (HTF 타이머 안의 한문 숙제에서 쓴다). 고르지 않으면 null.
+async function chooseHanjaMode() {
+  const h = state.user.hanja;
+  let weakN = 0;
+  try { weakN = (await api.hanja()).weak.length; } catch (_) { /* 약한 글자 수는 없어도 된다 */ }
+  return new Promise((resolve) => {
+    const back = document.createElement('div');
+    back.className = 'modal-back';
+    back.innerHTML = `
+      <div class="card modal" role="dialog" aria-modal="true">
+        <h3>🎯 오늘은 뭘 해 볼까요? <small>시험까지 ${ddayText(h.exam)}</small></h3>
+        <div class="hz-choices">
+          <button class="btn btn-yellow" data-v="mock">📝 모의시험<small>20문제 · 실전 연습</small></button>
+          ${weakN ? `<button class="btn btn-hanja" data-v="weak">🎯 약한 글자 수업<small>틀렸던 글자 ${weakN}개 중 5개</small></button>` : ''}
+          ${h.canAdvance && h.started ? `<button class="btn btn-white" data-v="today">📖 순서대로 수업<small>오늘 ${h.advToday}/${h.goal}</small></button>` : ''}
+          <button class="btn btn-white" data-v="book">📚 교재 따라 수업<small>교재에서 오늘 배운 글자 고르기</small></button>
+        </div>
+        <button class="back-link" data-v="">다음에 할래요</button>
+      </div>`;
+    document.body.appendChild(back);
+    back.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-v]');
+      if (!b) return;
+      sfx.tap();
+      back.remove();
+      resolve(b.dataset.v || null);
+    });
+  });
+}
+
+// 교재에서 오늘 배우는 한자를 직접 골라 수업한다 (최대 5자). 고르지 않고 닫으면 null.
+function pickBookChars(hz, course) {
+  const all = hz.allChars(course);
+  const picked = [];
+  return new Promise((resolve) => {
+    const back = document.createElement('div');
+    back.className = 'modal-back';
+    const grids = course.levels.map((lv) => `<div class="hz-lv">${esc(lv.key)}</div><div class="hz-grid">${all.filter((c) => c.day >= lv.startDay && c.day < lv.startDay + lv.days)
+      .map((c) => `<button type="button" class="hz-cell" data-h="${esc(c.h)}" title="${esc(c.k)} ${esc(c.s)}">${esc(c.h)}</button>`).join('')}</div>`).join('');
+    back.innerHTML = `
+      <div class="card modal hz-pick" role="dialog" aria-modal="true">
+        <h3>📚 교재 글자 고르기<small>교재에서 오늘 배우는 한자를 눌러요 (최대 5자)</small></h3>
+        <div class="hz-picked" id="pk-sel"></div>
+        <div class="hz-pickgrid">${grids}</div>
+        <div class="row"><button class="btn btn-white" data-v="0">취소</button><button class="btn btn-hanja" data-v="1" id="pk-go" disabled>✏️ 수업 시작</button></div>
+      </div>`;
+    document.body.appendChild(back);
+    const sel = back.querySelector('#pk-sel');
+    const go = back.querySelector('#pk-go');
+    const paint = () => {
+      sel.innerHTML = picked.length
+        ? picked.map((c) => `<span class="hz-chip"><b>${esc(c.h)}</b><small>${esc(c.k)} ${esc(c.s)}</small></span>`).join('')
+        : '<small>아직 고른 글자가 없어요</small>';
+      back.querySelectorAll('.hz-cell').forEach((b) => b.classList.toggle('on', picked.some((c) => c.h === b.dataset.h)));
+      go.disabled = !picked.length;
+    };
+    paint();
+    back.addEventListener('click', (e) => {
+      const cell = e.target.closest('.hz-cell');
+      if (cell) {
+        const i = picked.findIndex((c) => c.h === cell.dataset.h);
+        if (i >= 0) picked.splice(i, 1);
+        else if (picked.length < 5) picked.push(all.find((c) => c.h === cell.dataset.h));
+        else { toast('한 번에 5자까지 고를 수 있어요'); sfx.error(); return; }
+        sfx.tap();
+        paint();
+        return;
+      }
+      const b = e.target.closest('[data-v]');
+      if (!b) return;
+      sfx.tap();
+      back.remove();
+      resolve(b.dataset.v === '1' ? picked.slice() : null);
+    });
+  });
+}
+
+async function runHanjaBook(hz, course) {
+  const chars = await pickBookChars(hz, course);
+  if (!chars) return { done: false };
+  return hz.openLesson({
+    course,
+    title: '📚 교재 따라 수업',
+    chars,
+    review: [],
+    quiz: true,
+    day: 0,
+    confirm: confirmDialog,
+    doneLabel: '🏆 오늘 한문 끝!',
+    save: async (result) => {
+      const r = await api.hanjaWeak({ kind: 'book', score: result.score, misses: result.misses, results: result.results });
+      Object.assign(state.user, r.user);
+      return r;
+    },
+  });
+}
+
+async function runHanjaWeak(hz, course) {
+  let weak = [];
+  try { weak = (await api.hanja()).weak; } catch (_) { /* 아래에서 안내 */ }
+  const all = hz.allChars(course);
+  const chars = weak.slice(0, 5).map((x) => all.find((c) => c.h === x)).filter(Boolean);
+  if (!chars.length) {
+    toast('약한 글자가 아직 없어요. 모의시험부터 해 볼까요? 📝');
     return { done: false };
   }
+  return hz.openLesson({
+    course,
+    title: '🎯 약한 글자 수업',
+    chars,
+    review: [],
+    quiz: true,
+    day: 0,
+    confirm: confirmDialog,
+    doneLabel: '🏆 오늘 한문 끝!',
+    save: async (result) => {
+      const r = await api.hanjaWeak({ score: result.score, misses: result.misses, results: result.results });
+      Object.assign(state.user, r.user);
+      return r;
+    },
+  });
+}
+
+async function runHanjaMock(hz, course) {
+  let weak = [];
+  try { weak = (await api.hanja()).weak; } catch (_) { /* 약한 글자 없이 무작위로 */ }
+  const r = await hz.openLesson({
+    course,
+    title: '📝 모의시험',
+    chars: [],
+    exam: { questions: hz.makeExamQuestions(course, { count: 20, weak }), note: '배정한자 300자에서 20문제를 풀어요. 전에 틀렸던 글자도 섞여 있어요.', sub: '실전처럼 한 번에 하나씩' },
+    day: 0,
+    confirm: confirmDialog,
+    doneLabel: '👍 끝내기',
+    save: async (result) => {
+      const rr = await api.hanjaMock({ results: result.results });
+      Object.assign(state.user, rr.user);
+      return rr;
+    },
+  });
+  // 틀린 글자가 있으면 바로 약한 글자 수업으로 이어 갈 수 있다 (모의시험 기록은 이미 저장됐다)
+  if (r.done && r.next === 'weak') await runHanjaWeak(hz, course);
+  return r;
+}
+
+async function runHanja({ mode = 'auto', day = null } = {}) {
+  const loaded = await loadHanja();
+  if (!loaded) return { done: false };
+  const { hz, course } = loaded;
+  if (mode === 'mock') return runHanjaMock(hz, course);
+  if (mode === 'weak') return runHanjaWeak(hz, course);
+  if (mode === 'book') return runHanjaBook(hz, course);
   const h = state.user.hanja;
-  const today = !day && !h.doneToday && !h.finished;
-  const target = day || (today ? h.day : h.finished ? 1 + Math.floor(Math.random() * h.totalDays) : h.day - 1);
+  const today = !day && mode !== 'replay' && h.canAdvance;
+  const target = day || (today ? h.day : h.finished ? 1 + Math.floor(Math.random() * h.totalDays) : Math.max(1, h.day - 1));
   const d = hz.dayOf(course, target);
   let doneDays = new Set();
   if (today) { // 몸풀기는 실제로 배운 날의 글자로만 낸다
@@ -1216,7 +1414,7 @@ async function runHanja({ day = null } = {}) {
     confirm: confirmDialog,
     doneLabel: today ? '🏆 오늘 한문 끝!' : '👍 복습 끝!',
     save: async (result) => {
-      const r = await api.hanjaComplete({ day: target, score: result.score, misses: result.misses });
+      const r = await api.hanjaComplete({ day: target, score: result.score, misses: result.misses, results: result.results });
       Object.assign(state.user, r.user);
       return r;
     },
@@ -1341,7 +1539,7 @@ function screenMyPage() {
     else paneRecords();
   });
 
-  // 한문 6급: 진도와 배운 글자 모음. 배운 글자를 누르면 그 글자만 다시 연습한다.
+  // 한문 6급: 진도와 배운 글자 모음, 시험 대비(약한 글자·모의시험). 글자를 누르면 그 글자만 다시 연습한다.
   async function paneHanja() {
     pane.innerHTML = '<p class="empty">불러오는 중<span class="dots"></span></p>';
     let hz;
@@ -1356,9 +1554,11 @@ function screenMyPage() {
     }
     u.hanja = status.hanja;
     const h = status.hanja;
+    const ex = h.exam;
     const done = new Set(status.doneDays); // 실제로 수업을 마친 날 (시작 단계를 건너뛴 날은 빠진다)
     const learnedCount = done.size * h.perDay;
     const pct = Math.round((learnedCount / (h.totalDays * h.perDay)) * 100);
+    const byH = new Map(hz.allChars(course).map((c) => [c.h, c]));
     const dayRow = (d) => `<option value="${d.day}">Day ${d.day} · ${esc(d.title)}</option>`;
     const grid = course.levels.map((lv) => {
       const days = course.days.filter((d) => d.day >= lv.startDay && d.day < lv.startDay + lv.days);
@@ -1367,13 +1567,24 @@ function screenMyPage() {
     ? `<button class="hz-cell learned" data-char="${esc(c.h)}" title="${esc(c.k)} ${esc(c.s)}">${esc(c.h)}</button>`
     : '<span class="hz-cell locked">？</span>'))).join('')}</div>`;
     }).join('');
-    const logs = status.log.map((l) => `<div class="rec"><div class="thumb">📖</div><div class="r-body"><div class="r-title">Day ${l.day}${l.advanced ? '' : ' (복습)'}</div><div class="r-meta">${stars(l.score)}<small>${new Date(l.doneAt).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' })} ${fmtClock(l.doneAt)}</small></div></div></div>`).join('');
+    const weakCells = status.weak.map((x) => byH.get(x)).filter(Boolean)
+      .map((c) => `<button class="hz-cell weak" data-char="${esc(c.h)}" title="${esc(c.k)} ${esc(c.s)}">${esc(c.h)}</button>`).join('');
+    const examCard = ex || status.asked ? `
+        <div class="card hz-prog hz-exam">
+          <h2>🎯 ${ex ? `시험까지 ${ddayText(ex)} <small>${monthDay(ex.date)}</small>` : '시험 대비'}</h2>
+          <div>${status.weak.length ? `다시 볼 약한 글자 <b>${status.weak.length}</b>개 · 눌러서 연습해요` : status.asked ? '약한 글자가 없어요! 잘하고 있어요 🎉' : '모의시험을 보면 약한 글자를 찾아 줘요'}</div>
+          ${weakCells ? `<div class="hz-grid">${weakCells}</div>` : ''}
+          <div class="chips"><button class="btn btn-hanja small" id="mk-go">📝 모의시험</button>${weakCells ? '<button class="btn btn-hanja small" id="wk-go">🎯 약한 글자 수업</button>' : ''}</div>
+        </div>` : '';
+    const logs = status.log.map((l) => `<div class="rec"><div class="thumb">${hanjaLogIcon(l)}</div><div class="r-body"><div class="r-title">${hanjaLogLabel(l)}</div><div class="r-meta">${stars(l.score)}<small>${new Date(l.doneAt).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' })} ${fmtClock(l.doneAt)}</small></div></div></div>`).join('');
     pane.innerHTML = `
       <div style="display:grid;gap:14px;width:100%">
+        ${examCard}
         <div class="card hz-prog">
           <h2>📖 한문 6급 · 하루 5자</h2>
           <div>${h.finished ? '🏆 60일 코스를 모두 마쳤어요!' : `다음은 <b>Day ${h.day}</b> · ${esc(hz.dayOf(course, h.day).title)}`} · 배운 글자 <b>${learnedCount}</b> / ${h.totalDays * h.perDay}</div>
           <div class="hz-bar"><i style="width:${pct}%"></i></div>
+          <div class="chips"><button class="btn btn-hanja small" id="bk-go">📚 교재 글자로 수업</button></div>
           ${done.size ? `<div class="chips"><select id="rp" aria-label="복습할 날">${course.days.filter((d) => done.has(d.day)).map(dayRow).join('')}</select><button class="btn btn-hanja small" id="rp-go">🔁 복습 수업</button></div>` : '<small>아직 마친 수업이 없어요. 숙제 화면에서 오늘의 한문을 시작해 봐요!</small>'}
         </div>
         <div class="card"><h3>배운 글자 <small>(눌러서 연습)</small></h3>${grid}</div>
@@ -1389,7 +1600,19 @@ function screenMyPage() {
       }
       if (e.target.closest('#rp-go')) {
         sfx.pop();
-        await runHanja({ day: Number($('#rp', pane).value) });
+        await runHanja({ mode: 'replay', day: Number($('#rp', pane).value) });
+        paneHanja();
+      } else if (e.target.closest('#bk-go')) {
+        sfx.pop();
+        await runHanja({ mode: 'book' });
+        paneHanja();
+      } else if (e.target.closest('#mk-go')) {
+        sfx.pop();
+        await runHanja({ mode: 'mock' });
+        paneHanja();
+      } else if (e.target.closest('#wk-go')) {
+        sfx.pop();
+        await runHanja({ mode: 'weak' });
         paneHanja();
       }
     };
@@ -1898,13 +2121,19 @@ async function screenParentHanja(name) {
   const h = info.hanja;
   const LV = ['8급', '7급Ⅱ', '7급', '6급Ⅱ', '6급 새 한자'];
   const nowDay = Math.min(h.day, h.totalDays);
+  const ex = h.exam;
+  const byH = new Map(hz.allChars(course).map((c) => [c.h, c]));
+  const weakChips = info.weak.map((x) => byH.get(x)).filter(Boolean).map((c) => `<span class="hz-chip"><b>${esc(c.h)}</b><small>${esc(c.k)} ${esc(c.s)}</small></span>`).join('');
+  const exNote = ex
+    ? `시험 ${monthDay(ex.date)} · ${ddayText(ex)} · ${{ study: '공부 기간', final: '마무리 3일', today: '시험날' }[ex.phase]}${ex.phase === 'study' ? ` · 오늘 순서대로 수업 ${h.advToday}/${h.goal}` : ''}`
+    : '시험 날짜가 없어요 (정하지 않았거나 이미 지났어요)';
   const dayNote = h.finished ? '60일을 모두 마쳤어요 🏆' : `다음에 공부할 날: Day ${h.day} · ${esc(hz.dayOf(course, h.day).title)} (${esc(hz.dayOf(course, h.day).level)})`;
-  const logs = info.log.map((l) => `<div class="rec"><div class="thumb">📖</div><div class="r-body"><div class="r-title">Day ${l.day}${l.advanced ? '' : ' (복습)'}</div><div class="r-meta">${stars(l.score)}<small>실수 ${l.misses}번 · ${new Date(l.doneAt).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' })} ${fmtClock(l.doneAt)}</small></div></div></div>`).join('');
+  const logs = info.log.map((l) => `<div class="rec"><div class="thumb">${hanjaLogIcon(l)}</div><div class="r-body"><div class="r-title">${hanjaLogLabel(l)}</div><div class="r-meta">${stars(l.score)}<small>${l.kind === 'lesson' ? '실수' : '틀린 문제'} ${l.misses}번 · ${new Date(l.doneAt).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' })} ${fmtClock(l.doneAt)}</small></div></div></div>`).join('');
   const el = mount(`
     <div class="my">
       <button class="back-link" id="back">← 부모님 메뉴</button>
       <h2 style="font-size:1.9rem">📖 ${esc(name)}의 한문 6급</h2>
-      <p class="sub">한국어문회 6급 배정한자 300자를 하루 5자씩 60일 동안 익혀요. 아이는 숙제 화면에서 "오늘의 한문"을 숙제로 넣고, 태블릿에 획순대로 따라 쓰며 외워요.</p>
+      <p class="sub">한국어문회 6급 배정한자 300자를 하루 5자씩 60일 코스로 익혀요. 시험 날짜를 정하면 D-day 와 함께 모의시험·약한 글자 수업이 나오고, 순서대로 수업은 남은 날에 맞춰 하루 1~3개가 목표예요.</p>
       <div class="card" style="display:grid;gap:12px">
         <div><b>${h.enabled ? '✅ 켜져 있어요' : '⏸️ 꺼져 있어요'}</b> <small>${info.defaultOn ? '(기본값: 켜짐)' : '(기본값: 꺼짐)'}</small></div>
         <div class="pc-actions">
@@ -1923,14 +2152,30 @@ async function screenParentHanja(name) {
           ${h.doneToday ? '<button class="btn btn-yellow small" data-reopen="1">🔓 오늘 몫 다시 열기</button>' : ''}
         </div>
       </div>
+      <div class="card" style="display:grid;gap:12px">
+        <div><b>🎯 시험 대비</b><br><small>${exNote}</small></div>
+        <div class="chips"><small>시험 날짜</small>
+          <input type="date" id="exam-date" value="${ex ? ex.date : ''}" aria-label="시험 날짜" style="font:inherit;padding:6px 10px;border:3px solid var(--ink);border-radius:12px">
+          <button class="btn btn-blue small" data-exam="set">저장</button>
+          <button class="btn btn-white small" data-exam="none">시험 없음</button>
+          ${info.examDefault ? `<button class="btn btn-white small" data-exam="default">↩️ 기본값 (${monthDay(info.examDefault)})</button>` : ''}
+        </div>
+        <div><small>모의시험·수업에서 만난 글자 ${info.asked}자 · 약한 글자 ${info.weak.length}개 (틀린 뒤 연속 2번 맞히면 빠져요)</small></div>
+        ${weakChips ? `<div class="hz-chips">${weakChips}</div>` : ''}
+      </div>
       ${logs ? `<div class="card"><h3>최근 수업 기록</h3><div style="display:grid;gap:10px;margin-top:8px">${logs}</div></div>` : ''}
     </div>`);
   $('#back', el).onclick = () => { sfx.tap(); screenParent(); };
   el.addEventListener('click', async (e) => {
-    const b = e.target.closest('[data-set],[data-day],[data-reopen]');
+    const b = e.target.closest('[data-set],[data-day],[data-reopen],[data-exam]');
     if (!b) return;
     sfx.tap();
     const body = {};
+    if (b.dataset.exam) {
+      const v = $('#exam-date', el).value;
+      if (b.dataset.exam === 'set' && !v) { toast('시험 날짜를 골라 주세요', 'err'); sfx.error(); return; }
+      body.exam = { set: v, none: '', default: null }[b.dataset.exam];
+    }
     if (b.dataset.set) body.enabled = { on: true, off: false, default: null }[b.dataset.set];
     if (b.dataset.day) body.day = Number(b.dataset.day);
     if (b.dataset.reopen) body.reopenToday = true;
@@ -2156,5 +2401,5 @@ async function boot() {
 }
 
 // 개발·점검용: localStorage.htf_debug = '1' 이면 화면을 직접 불러 볼 수 있다 (world.js 의 점검용 훅과 같은 방식)
-try { if (localStorage.getItem('htf_debug') === '1') window.__htfApp = { state, screenFinish, screenParent, screenHomework, screenRun, screenMyPage, runHanja }; } catch (_) { /* 무시 */ }
+try { if (localStorage.getItem('htf_debug') === '1') window.__htfApp = { state, screenFinish, screenParent, screenParentHanja, screenHomework, screenRun, screenMyPage, runHanja }; } catch (_) { /* 무시 */ }
 boot();
