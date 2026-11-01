@@ -8,9 +8,21 @@ export const SKIN = ['#ffe5d0', '#ffdcc0', '#f4c7a1', '#e0a97c', '#b97a4f', '#7a
 export const HAIR = ['#2a2018', '#4a2f22', '#7a4b2a', '#b5793f', '#e0b25a', '#f2d98b', '#1f1f2e', '#8a8a95', '#e6e6ee', '#c0392b', '#7a4bd0', '#2b8a8a'];
 export const TOP = ['#ffd23f', '#ff8a8a', '#ff9ec7', '#c7a6ff', '#7ec8ff', '#8fd3d9', '#a6e3a1', '#ffc38a', '#f2a7c4', '#6c8ebf', '#ffffff', '#3b3f58'];
 export const BOTTOM = ['#1f2030', '#2b2d42', '#3b3f58', '#6c757d', '#8d6e63', '#4a6fa5', '#7b9e87', '#c97b84', '#ffffff'];
-export const HAIR_STYLES = [
-  ['short', '짧은 머리'], ['long', '긴 머리'], ['bob', '단발'], ['pony', '묶은 머리'], ['twin', '양갈래'], ['bun', '올림머리'],
+// 머리 모양: [값, 이름]. 값은 character.js 의 머리 만들기, 서버 server/npcs.js 의 목록과 같아야 한다
+export const HAIR_GROUPS = [
+  ['👦 남자 머리 모양', [
+    ['short', '짧은 머리'], ['crew', '스포츠머리'], ['twoblock', '투블럭'], ['wave', '웨이브 펌'], ['perm', '뽀글 파마'],
+    ['afro', '아프로 파마'], ['spiky', '뾰족 머리'], ['mohawk', '모히칸'], ['bowl', '바가지 머리'],
+  ]],
+  ['👧 여자 머리 모양', [
+    ['long', '긴 머리'], ['bob', '단발'], ['pony', '묶은 머리'], ['twin', '양갈래'], ['bun', '올림머리'],
+  ]],
 ];
+export const HAIR_STYLES = HAIR_GROUPS.flatMap(([, list]) => list);
+
+const hairField = (current) => HAIR_GROUPS.map(([title, list]) => `
+        <div class="field"><span class="lbl">${title}</span>
+          <div class="seg wrap" data-key="hairStyle">${list.map(([v, l]) => `<button type="button" class="${current === v ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</div></div>`).join('');
 
 // 아이가 자기 교실 캐릭터를 꾸민다: 머리 모양·머리색·피부색·옷 색·바지/치마·안경 (3D 미리보기가 천천히 돈다).
 // onSave(look) 는 async (실패하면 throw). 저장하면 true, 취소하면 false.
@@ -40,8 +52,7 @@ export async function openLookEditor({ look, name = '', onSave }) {
     let closed = false;
     const render = () => {
       q('#ne-form').innerHTML = `
-        <div class="field"><span class="lbl">머리 모양</span>
-          <div class="seg wrap" data-key="hairStyle">${HAIR_STYLES.map(([v, l]) => `<button type="button" class="${draft.hairStyle === v ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</div></div>
+        ${hairField(draft.hairStyle)}
         <div class="field"><span class="lbl">머리 색</span>${swatches('hair', HAIR, draft.hair)}</div>
         <div class="field"><span class="lbl">피부 색</span>${swatches('skin', SKIN, draft.skin)}</div>
         <div class="field"><span class="lbl">윗옷 색</span>${swatches('top', TOP, draft.top)}</div>
@@ -174,8 +185,7 @@ export async function openNpcEditor({ initial, kidName, onSave }) {
         <div class="field"><label for="ne-msg">아이를 만나면 하는 말</label>
           <input id="ne-msg" maxlength="80" placeholder="예) 오늘도 정말 수고했어요 😊" value="${esc(draft.msg)}">
           <small class="hint">{이름} 이라고 쓰면 아이 이름으로 바뀌어요</small></div>
-        <div class="field"><span class="lbl">머리 모양</span>
-          <div class="seg wrap" data-key="hairStyle">${HAIR_STYLES.map(([v, l]) => `<button type="button" class="${draft.look.hairStyle === v ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</div></div>
+        ${hairField(draft.look.hairStyle)}
         <div class="field"><span class="lbl">머리 색</span>${swatches('hair', HAIR, draft.look.hair)}</div>
         <div class="field"><span class="lbl">피부 색</span>${swatches('skin', SKIN, draft.look.skin)}</div>
         <div class="field"><span class="lbl">상의 색</span>${swatches('top', TOP, draft.look.top)}</div>

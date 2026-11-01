@@ -3,7 +3,8 @@
 //  look: 외모 { skin, hair, hairStyle, top, bottom, bottomStyle, glasses }
 
 const ROLES = ['friend', 'teacher'];
-const HAIR_STYLES = ['short', 'long', 'bob', 'pony', 'twin', 'bun'];
+// 남자: short crew twoblock wave perm afro spiky mohawk bowl / 여자: long bob pony twin bun (public/js/classroom.js 의 HAIR_GROUPS 와 같게)
+const HAIR_STYLES = ['short', 'crew', 'twoblock', 'wave', 'perm', 'afro', 'spiky', 'mohawk', 'bowl', 'long', 'bob', 'pony', 'twin', 'bun'];
 const BOTTOM_STYLES = ['pants', 'skirt'];
 const MAX_NPCS = 12;
 const hex = /^#[0-9a-fA-F]{6}$/;

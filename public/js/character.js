@@ -288,6 +288,9 @@ export function characterKit(T, tb) {
   };
   const unit = G.sph(1, 14, 10);
   G.cap0 = new T.SphereGeometry(1, 24, 9, 0, Math.PI * 2, 0, 1.45);
+  G.cone = new T.ConeGeometry(1, 2, 8, 1);
+  // 위에서 t(라디안)까지만 덮는 둥근 모자 조각
+  G.capTo = (t) => { const k = `a${t}`; if (!geo.has(k)) geo.set(k, new T.SphereGeometry(1, 24, 9, 0, Math.PI * 2, 0, t)); return geo.get(k); };
 
   // 머리뼈 모양: 아래로 갈수록 갸름하게 (턱선)
   const shapeHead = (g) => {
@@ -346,7 +349,134 @@ export function characterKit(T, tb) {
     return { g: unit, p: radial.multiplyScalar(R).toArray(), q, s: [w, half, th] };
   };
 
+  // 머리 위 한 점(방위각 az, 높이각 el)에 놓는 덩어리: w=옆 폭, h=바깥쪽 높이, l=머리 둘레 방향 길이 (모두 반지름), spin=바깥 방향 축 둘레 회전
+  const hairAt = (g, az, el, R, w, h, l, spin = 0, c) => {
+    const radial = new T.Vector3(Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el));
+    const east = new T.Vector3(Math.cos(az), 0, -Math.sin(az));
+    const q = new T.Quaternion().setFromRotationMatrix(new T.Matrix4().makeBasis(east, radial, east.clone().cross(radial)));
+    if (spin) q.multiply(new T.Quaternion().setFromAxisAngle(new T.Vector3(0, 1, 0), spin));
+    return { g, p: radial.multiplyScalar(R).toArray(), q, s: [w, h, l], c };
+  };
+
+  const BASE_S = [0.333, 0.322, 0.321];
+  const DIM = '#c2c2c2'; // 짧게 민 옆머리는 조금 어둡게
+  // 모자 조각: t=덮는 높이각, k=크기, dz=뒤로 물린 정도 (짧게 민 머리는 이마 쪽까지 바짝 붙인다)
+  const capPart = (t, k, c, dz = -0.03) => ({ g: G.capTo(t), p: [0, 0.017, dz], s: BASE_S.map((v) => v * k), c });
+  const sidePart = (t0, tl, gap, k, c, dz = -0.03) => ({ g: G.shell(t0, tl, gap), p: [0, 0.017, dz], s: BASE_S.map((v) => v * k), c });
+  const sideburns = (top, bot, R = 0.332) => [-1, 1].map((sx) => lock(sx * 1.32, top, bot, 0.035, 0.035, R));
+  // 짧게 친 머리 한 벌: 이마 가운데는 높고 옆으로 갈수록 점점 내려와서 머리선이 자연스럽다 (귀는 보인다)
+  const trimmed = (k, c, dz) => [
+    capPart(1.25, k, c, dz),
+    ...[1, 2, 3, 4, 5].map((i) => sidePart(1.2, 0.1 + 0.115 * (i - 1), 0.4 + 0.2 * (i - 1), k, c, dz)),
+    sidePart(1.6, 0.5, 1.9, k, c, dz),
+  ];
+  // 이마를 덮는 앞머리: botOf(az, k) 가 가닥마다 내려오는 높이, roll 은 한쪽으로 쓸어 넘기는 정도
+  const fringe = (R, top, botOf, { w = 0.05, th = 0.045, step = 0.15, roll = () => 0 } = {}) => {
+    const out = [];
+    for (let k = -6; k <= 6; k += 1) {
+      const az = k * step;
+      const l = lock(az, top, botOf(az, k), w, th, R + (Math.abs(k) % 2) * 0.004);
+      const r = roll(az, k);
+      if (r) l.q.multiply(new T.Quaternion().setFromAxisAngle(new T.Vector3(0, 0, 1), r));
+      out.push(l);
+    }
+    return out;
+  };
+
+  // 말린 머리: S 가 클수록 크게 부푼다
+  const curls = (S) => {
+    const it = [capPart(1.35, 0.96 * Math.min(S, 1.1)), ...trimmed(0.96 * Math.min(S, 1.1))];
+    const rows = [[1.5, 1, 0.09, 0], [1.2, 6, 0.082, 0], [0.9, 9, 0.08, 0], [0.62, 12, 0.076, 0], [0.33, 14, 0.072, 0.85 * Math.min(S, 1.15)], [0.02, 14, 0.068, 1.15 * Math.min(S, 1.15)], [-0.28, 10, 0.062, 1.35 * Math.min(S, 1.15)], [-0.58, 6, 0.056, 1.8]];
+    rows.forEach(([el, n, r, skip], ri) => {
+      for (let i = 0; i < n; i += 1) {
+        const az = ((i + (ri % 2) * 0.5) / n) * Math.PI * 2;
+        const d = Math.abs(Math.atan2(Math.sin(az), Math.cos(az))); // 앞(0)에서 얼마나 떨어졌나
+        const j = (hash(`${ri}-${i}`) % 100) / 100 - 0.5;
+        const rr = r * S * (1 + j * 0.2);
+        if (d >= skip) it.push(hairAt(G.sph(1, 9, 7), az + j * 0.12, el + j * 0.06, 0.298 + (S - 1) * 0.1, rr, rr * 0.95, rr));
+      }
+    });
+    for (let i = -2; i <= 2; i += 1) it.push(hairAt(G.sph(1, 9, 7), i * 0.27, 0.42 - Math.abs(i) * 0.03, 0.312, 0.06 * Math.min(S, 1.2), 0.056 * Math.min(S, 1.2), 0.06 * Math.min(S, 1.2)));
+    return it;
+  };
+
+  // 남자 머리 모양들. 얼굴(눈·눈썹)이 보이도록 앞쪽 아래는 늘 비워 둔다.
+  const maleHair = {
+    // 스포츠머리: 아주 짧게 바짝 깎았다 (이마 위에 짧은 머리카락이 오톨도톨)
+    crew: () => [
+      ...trimmed(0.96, undefined, -0.005),
+      ...fringe(0.318, 0.85, (az, k) => 0.34 + (hash(String(k)) % 5) * 0.012 + Math.abs(k) * 0.015, { w: 0.036, th: 0.03, step: 0.13 }),
+    ],
+
+    // 모히칸: 옆은 짧게 밀고 가운데만 앞에서 뒤로 뾰족하게 세운다
+    mohawk: () => {
+      const it = trimmed(0.955, DIM, -0.005);
+      const N = 11;
+      for (let i = 0; i < N; i += 1) {
+        const t = i / (N - 1);
+        const u = -0.85 + t * 2.5; // 이마 위(-) → 정수리(0) → 뒤통수(+)
+        const az = u < 0 ? 0 : Math.PI;
+        const el = u < 0 ? Math.PI / 2 + u : Math.PI / 2 - u;
+        const s = Math.sin(Math.PI * t);
+        const ridge = 0.05 + 0.04 * s;
+        it.push(hairAt(G.sph(1, 10, 8), az, el, 0.3, 0.066, ridge, 0.078));
+        const h = 0.07 + 0.065 * s;
+        it.push(hairAt(G.cone, az, el, 0.3 + ridge * 0.6 + h * 0.5, 0.058, h, 0.07));
+      }
+      return it;
+    },
+
+    // 투블럭: 윗머리는 풍성하게 한쪽으로 쓸어 내리고, 옆·뒤는 짧게 쳐서 점점 짧아진다 (귀가 다 보인다)
+    twoblock: () => [
+      capPart(1.25, 1.05),
+      capPart(1.4, 0.99, '#d6d6d6', -0.012),
+      ...trimmed(0.96, DIM, -0.03),
+      ...fringe(0.355, 0.95, (az, k) => 0.11 + (k + 6) * 0.011, { w: 0.058, th: 0.05, roll: () => -0.3 }),
+    ],
+
+    // 가르마 펌: 한쪽으로 가르마를 타서 앞머리가 양옆으로 물결치듯 흘러내린다
+    wave: () => {
+      const part = 0.3;
+      const it = [capPart(1.4, 1.025), ...trimmed(1.0, undefined, -0.03)];
+      it.push(...fringe(0.345, 0.9, (az) => (az < part ? 0.17 + (part - az) * 0.1 : 0.27 + (az - part) * 0.05), {
+        w: 0.056, th: 0.05, roll: (az) => (az < part ? 0.6 : -0.5),
+      }));
+      for (const [az, el] of [[-0.8, 1.0], [-0.35, 1.2], [0.15, 1.3], [0.55, 1.1], [0.85, 0.85]]) {
+        it.push(hairAt(G.sph(1, 10, 8), az, el, 0.335, 0.1, 0.045, 0.05, 0.7));
+      }
+      for (const el of [0.85, 1.1, 1.35]) it.push(hairAt(G.sph(1, 8, 6), part, el, 0.347, 0.008, 0.006, 0.1, 0, '#777777'));
+      return it;
+    },
+
+    // 뽀글 파마: 동글동글 말린 머리카락이 머리 둘레에 가득
+    perm: () => curls(1),
+
+    // 아프로 파마: 크고 동그랗게 부풀린 파마
+    afro: () => curls(1.45),
+
+    // 뾰족 머리: 젤을 발라 위로 쭈뼛쭈뼛 세운 머리
+    spiky: () => {
+      const it = [capPart(1.45, 0.99, undefined, -0.02), ...trimmed(0.97)];
+      const N = 17;
+      for (let i = 0; i < N; i += 1) {
+        const el = Math.PI / 2 - Math.sqrt((i + 0.5) / N) * 1.25; // 정수리에서 퍼져 나가는 해바라기 씨앗 배열
+        const h = 0.08 + 0.02 * ((i * 7) % 3);
+        it.push(hairAt(G.cone, i * 2.39996, el, 0.31 + h * 0.5, 0.062, h, 0.062));
+      }
+      for (let i = -2; i <= 2; i += 1) it.push(hairAt(G.cone, i * 0.3, 0.5, 0.35, 0.05, 0.085, 0.05));
+      return it;
+    },
+
+    // 바가지 머리: 이마 위로 일자 앞머리, 귀 위까지 동글게 덮는다
+    bowl: () => [
+      capPart(1.45, 1.02),
+      sidePart(1.45, 0.62, 0.7, 1.035),
+      ...fringe(0.343, 0.9, (az, k) => 0.3 + Math.abs(k) * 0.005, { w: 0.052, th: 0.048, step: 0.13 }),
+    ],
+  };
+
   function hairItems(style, accent) {
+    if (maleHair[style]) return { hair: maleHair[style](), extra: [] };
     const it = [
       { g: G.cap0, p: [0, 0.017, -0.03], s: [0.333, 0.322, 0.321] },
       { g: G.shell(1.45, 0.8, 1.25), p: [0, 0.017, -0.03], s: [0.333, 0.322, 0.321] },
