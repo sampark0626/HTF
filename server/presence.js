@@ -5,7 +5,8 @@ const TTL_MS = 6000; // 이만큼 소식이 없으면 교실을 나간 것으로
 const SAY_MS = 6000; // 부모님이 한 말은 이만큼 보인다
 const MAX_PER_ROOM = 6;
 const KINDS = ['kid', 'mom', 'dad'];
-const BOUNDS = { x: 9, z: 7 }; // world.js 의 ROOM 과 같은 크기
+// 교실과 복도·화장실·2층까지 (public/js/world-shared.js 의 ZONES 를 다 덮는다)
+const BOUNDS = { x0: -9, x1: 20, z0: -8, z1: 34 };
 
 const rooms = new Map(); // 교실(아이 이름) → Map(참가자 id → 정보)
 
@@ -33,8 +34,8 @@ function sync(room, id, kind, body, now = Date.now()) {
   const me = {
     id,
     kind,
-    x: num(body.x, -BOUNDS.x, BOUNDS.x),
-    z: num(body.z, -BOUNDS.z, BOUNDS.z),
+    x: num(body.x, BOUNDS.x0, BOUNDS.x1),
+    z: num(body.z, BOUNDS.z0, BOUNDS.z1),
     ry: num(body.ry, -10, 10),
     mv: num(body.mv, 0, 1),
     say: prev ? prev.say : '',

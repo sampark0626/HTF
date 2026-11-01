@@ -1423,15 +1423,22 @@ async function runHanja({ mode = 'auto', day = null } = {}) {
 
 // 마음 쉼터(3D 교실 투어): 필요할 때만 불러온다. 끝나면 onClose({ stars, seconds, skipped })
 // room: 이 아이의 교실(문패·분위기), visit: 부모님이 엄마/아빠로 같이 들어올 때 { role }, presence: 같이 있는 사람과 위치를 주고받는 연결
-async function openTour({ user, preview = false, visit = null, room = null, npcs = [], presence = null, onClose }) {
+async function openTour({ user, preview = false, visit = null, room = null, npcs = [], presence = null, worldInfo = null, buy = null, onClose }) {
   try {
     const { startWorld } = await import('./world.js');
-    await startWorld({ user, preview, visit, room, npcs, presence, onDone: onClose });
+    await startWorld({ user, preview, visit, room, npcs, presence, worldInfo, buy, onDone: onClose });
   } catch (err) {
     console.warn('[tour]', err);
     toast('쉼터를 열지 못했어요. 잠시 뒤에 다시 해 봐요', 'err');
     onClose({ stars: 0, seconds: 0, skipped: true });
   }
+}
+
+// 마음 별로 쉼터에 새 공간을 한 곳 연다 (쉼터 안의 잠긴 문과 마이페이지 상점이 함께 쓴다)
+async function buyWorld(id) {
+  const r = await api.worldBuy(id);
+  Object.assign(state.user, r.user);
+  return r;
 }
 
 function screenFinish(reason, summary, { returning = false } = {}) {
@@ -1490,6 +1497,8 @@ function screenFinish(reason, summary, { returning = false } = {}) {
         user: state.user,
         npcs: cls.npcs,
         room: cls.room,
+        worldInfo: state.user.world,
+        buy: buyWorld,
         // 부모님이 같은 교실에 들어와 있으면 서로 볼 수 있다
         presence: { sync: (me) => api.presence(me), leave: () => api.presenceLeave() },
         onClose: async (res) => {
@@ -1521,6 +1530,7 @@ function screenMyPage() {
       <div class="tabs">
         <button class="tab on" data-tab="info">👤 내 정보</button>
         <button class="tab" data-tab="avatar">🎨 캐릭터</button>
+        <button class="tab" data-tab="world">🏗️ 쉼터</button>
         ${u.hanja && u.hanja.enabled ? '<button class="tab" data-tab="hanja">📖 한문</button>' : ''}
         <button class="tab" data-tab="rec">📒 숙제 기록</button>
       </div>
@@ -1536,8 +1546,58 @@ function screenMyPage() {
     if (t.dataset.tab === 'info') paneInfo();
     else if (t.dataset.tab === 'avatar') paneAvatar();
     else if (t.dataset.tab === 'hanja') paneHanja();
+    else if (t.dataset.tab === 'world') paneWorld();
     else paneRecords();
   });
+
+  // 마음 쉼터 넓히기: 마음 별로 새 공간을 하나씩 연다. 열린 공간은 "쉼터 구경하기"로 걸어 볼 수 있다.
+  function paneWorld() {
+    const w = u.world;
+    const cards = w.catalog.map((c) => {
+      const owned = w.unlocked.includes(c.id);
+      const prev = c.needs ? w.catalog.find((x) => x.id === c.needs) : null;
+      const locked = Boolean(prev) && !w.unlocked.includes(prev.id);
+      const can = !owned && !locked && w.stars >= c.cost;
+      const note = owned ? '✅ 열렸어요' : locked ? `🔒 먼저 앞 공간(${esc(prev.name)})을 열어요` : `⭐ ${c.cost}개`;
+      const btn = owned ? '' : `<button class="btn ${can ? 'btn-yellow' : 'btn-white'} small" data-buy="${c.id}" ${can ? '' : 'disabled'}>${can ? '🔓 열기' : locked ? '🔒' : `별 ${c.cost - w.stars}개 더`}</button>`;
+      return `<div class="card shop-item ${owned ? 'on' : ''}"><div class="si-icon">${c.icon}</div><div class="si-body"><b>${esc(c.name)}</b><small>${note}</small></div>${btn}</div>`;
+    }).join('');
+    pane.innerHTML = `
+      <div style="display:grid;gap:14px;width:100%">
+        <div class="card hz-prog">
+          <h2>🏗️ 마음 쉼터 넓히기</h2>
+          <div>쓸 수 있는 별 <b class="mind-stars">⭐ ${w.stars}개</b> · 지금까지 모은 별 ${w.earned}개</div>
+          <small>숙제를 모두 끝내고 마음 쉼터에 다녀오면 별이 쌓여요. 별로 새 공간을 하나씩 열어 봐요!</small>
+          <div class="chips"><button class="btn btn-mint small" id="tour-go">🌈 쉼터 구경하기</button></div>
+        </div>
+        ${cards}
+      </div>`;
+    pane.onclick = async (e) => {
+      const buyBtn = e.target.closest('[data-buy]');
+      if (buyBtn) {
+        sfx.pop();
+        buyBtn.disabled = true;
+        try {
+          const r = await buyWorld(buyBtn.dataset.buy);
+          sfx.success();
+          confetti({ count: 80, y: 0.6, emojis: ['⭐', '🔓', '✨'] });
+          toast(`🎉 열렸어요! ${r.item.icon} ${r.item.name} · 쉼터에서 만나요`);
+          paneWorld();
+        } catch (err) {
+          buyBtn.disabled = false;
+          toast(err.message, 'err');
+          sfx.error();
+        }
+        return;
+      }
+      if (e.target.closest('#tour-go')) {
+        sfx.unlock();
+        sfx.pop();
+        const cls = await api.classroom().catch(() => ({ npcs: [], room: null }));
+        openTour({ user: state.user, preview: true, npcs: cls.npcs, room: cls.room, worldInfo: state.user.world, buy: buyWorld, onClose: () => screenMyPage() });
+      }
+    };
+  }
 
   // 한문 6급: 진도와 배운 글자 모음, 시험 대비(약한 글자·모의시험). 글자를 누르면 그 글자만 다시 연습한다.
   async function paneHanja() {
@@ -1624,7 +1684,22 @@ function screenMyPage() {
         <h2>내 캐릭터 🎨</h2>
         <div id="picker"></div>
         <button class="btn btn-blue big" id="save">💾 이 모습으로 저장</button>
+      </div>
+      <div class="card" style="width:100%;display:grid;gap:10px;margin-top:14px">
+        <h3>🏫 마음 쉼터 캐릭터</h3>
+        <small>교실을 걸어 다닐 때의 내 모습이에요. 머리 모양, 머리·피부·옷 색, 안경을 바꿀 수 있어요.</small>
+        <button class="btn btn-yellow" id="look-go">🧑‍🎨 교실 캐릭터 꾸미기</button>
       </div>`;
+    $('#look-go', pane).onclick = async () => {
+      sfx.pop();
+      const { openLookEditor } = await import('./classroom.js');
+      const saved = await openLookEditor({
+        look: u.look,
+        name: u.name,
+        onSave: async (look) => { const r = await api.updateMe({ look }); Object.assign(u, r.user); state.user = u; },
+      });
+      if (saved) { confetti({ count: 60, y: 0.7 }); toast('교실 캐릭터를 바꿨어요! 마음 쉼터에서 만나요 ✅'); }
+    };
     const picker = mountAvatarPicker($('#picker', pane), u.avatar);
     const save = $('#save', pane);
     save.onclick = async () => {
@@ -2246,10 +2321,11 @@ async function enterClassroom(name, back) {
   sfx.pop();
   const sid = Math.random().toString(36).slice(2, 10); // 이 화면의 번호 (같은 사람의 움직임을 이어 붙인다)
   openTour({
-    user: { name, avatar: avatarOf(name) },
+    user: { name, avatar: avatarOf(name), look: cls.look },
     visit: { role },
     room: cls.room,
     npcs: cls.npcs,
+    worldInfo: cls.world,
     presence: { sync: (me) => api.adminPresence(name, { ...me, sid, role }), leave: () => api.adminPresenceLeave(name, { sid, role }) },
     onClose: () => back(),
   });
@@ -2260,8 +2336,10 @@ async function screenParentClassroom(name) {
   setTopbar('none');
   let npcs;
   let room;
+  let look;
+  let world;
   try {
-    ({ npcs, room } = await api.adminClassroom(name));
+    ({ npcs, room, look, world } = await api.adminClassroom(name));
   } catch (err) {
     toast(err.message, 'err');
     if (err.status === 401) screenParentLogin(); else screenParent();
@@ -2294,6 +2372,17 @@ async function screenParentClassroom(name) {
         <button class="btn btn-mint small" id="preview">🌈 이 교실 미리 보기</button>
         <button class="btn btn-white small" id="reset">↩️ 기본으로 되돌리기</button>
       </div>
+      <div class="card" style="display:grid;gap:10px">
+        <b>🏗️ 마음 쉼터 넓히기</b>
+        <small>쓸 수 있는 별 ⭐${world.stars}개 (모은 별 ${world.earned}개) · 연 공간 ${world.unlocked.length} / ${world.catalog.length}</small>
+        <div class="chips">${world.catalog.map((c) => `<span class="chipv ${world.unlocked.includes(c.id) ? 'okay' : ''}">${c.icon} ${esc(c.name)}${world.unlocked.includes(c.id) ? ' ✅' : ` ⭐${c.cost}`}</span>`).join('')}</div>
+        <div class="pc-actions">
+          <button class="btn btn-yellow small" data-wstars="5">⭐ +5 선물</button>
+          <button class="btn btn-yellow small" data-wstars="20">⭐ +20 선물</button>
+          <button class="btn btn-mint small" data-wnext="1">🔓 다음 공간 열어 주기</button>
+          <button class="btn btn-white small" data-wreset="1">↩️ 공간 처음으로</button>
+        </div>
+      </div>
       ${section('🧑‍🏫 선생님', npcs.filter((n) => n.role === 'teacher'))}
       ${section('🧒 친구들', npcs.filter((n) => n.role === 'friend'))}
     </div>`);
@@ -2304,12 +2393,38 @@ async function screenParentClassroom(name) {
   };
 
   $('#back', el).onclick = () => { sfx.tap(); screenParent(); };
+  el.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-wstars],[data-wnext],[data-wreset]');
+    if (!b) return;
+    sfx.tap();
+    const body = {};
+    if (b.dataset.wstars) body.addStars = Number(b.dataset.wstars);
+    if (b.dataset.wnext) {
+      const next = world.catalog.find((c) => !world.unlocked.includes(c.id));
+      if (!next) { toast('모든 공간이 열려 있어요'); return; }
+      body.unlock = next.id;
+    }
+    if (b.dataset.wreset) {
+      if (!(await confirmDialog({ title: '공간을 처음으로 되돌릴까요? ↩️', text: '열었던 공간이 다시 잠기고, 쓴 별은 돌려받아요.', yes: '되돌릴래요', no: '아니요' }))) return;
+      body.reset = true;
+    }
+    b.disabled = true;
+    try {
+      await api.adminWorld(name, body);
+      sfx.success();
+      screenParentClassroom(name);
+    } catch (err) {
+      b.disabled = false;
+      toast(err.message, 'err');
+      sfx.error();
+    }
+  });
   $('#preview', el).onclick = async () => {
     sfx.unlock();
     sfx.pop();
     const avatar = (state.config.kids.find((k) => k.name === name) || {}).avatar || { animal: 0, color: 0, acc: 0 };
     // 이 아이가 보게 될 모습 그대로 둘러본다 (별은 저장되지 않는다)
-    openTour({ user: { name, avatar }, preview: true, room, npcs, onClose: () => screenParentClassroom(name) });
+    openTour({ user: { name, avatar, look }, preview: true, room, npcs, worldInfo: world, onClose: () => screenParentClassroom(name) });
   };
   $('#visit', el).onclick = () => { sfx.tap(); enterClassroom(name, () => screenParentClassroom(name)); };
   $('#reset', el).onclick = async () => {

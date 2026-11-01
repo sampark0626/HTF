@@ -23,6 +23,16 @@ function sanitizeLook(raw) {
   return out;
 }
 
+// 저장된 글에서 외모를 읽는다 (없거나 망가졌으면 null)
+function parseLook(text) {
+  if (!text) return null;
+  try {
+    return sanitizeLook(JSON.parse(text));
+  } catch (_) {
+    return null;
+  }
+}
+
 const SKIN = '#ffdcc0';
 const look = (hair, hairStyle, top, bottom, extra = {}) => ({
   skin: SKIN, hair, hairStyle, top, bottom, bottomStyle: 'pants', glasses: false, ...extra,
@@ -61,4 +71,4 @@ function defaultNpcs(kidName) {
   ];
 }
 
-module.exports = { ROLES, MAX_NPCS, sanitizeLook, defaultNpcs };
+module.exports = { ROLES, MAX_NPCS, sanitizeLook, parseLook, defaultNpcs };

@@ -4,6 +4,43 @@
 // 교실 안쪽 크기(반쪽). 칠판은 앞(-z) 벽, 창문은 왼쪽(-x) 벽. 실제 초등학교 교실보다 조금 넓게 잡아 걸어 다니기 편하게 했다.
 export const ROOM = { x: 7, z: 6.2, h: 3.2 };
 export const PLAYER_R = 0.32;
+
+// 마음 쉼터 넓히기: 교실 오른쪽 문 밖으로 이어 붙는 공간들 (server/world.js 의 id 와 이어진다)
+//  x0~x1, z0~z1: 안쪽 바닥 크기 / y: 바닥 높이 / h: 천장 높이(바닥 기준)
+//  복도 hall1·hall2 는 한 줄로 이어지고, 화장실 wc 는 hall2 오른쪽 문 안, 계단 stairs 는 hall2 끝에서 2층 floor2 로 올라간다.
+export const ZONES = {
+  room: { x0: -ROOM.x, x1: ROOM.x, z0: -ROOM.z, z1: ROOM.z, y: 0, h: ROOM.h },
+  hall1: { x0: 7.3, x1: 11, z0: -6.2, z1: 6.2, y: 0, h: 3.2 },
+  hall2: { x0: 7.3, x1: 11, z0: 6.2, z1: 15, y: 0, h: 3.2 },
+  wc: { x0: 11.3, x1: 17, z0: 8.2, z1: 14.2, y: 0, h: 3.2 },
+  stairs: { x0: 7.3, x1: 11, z0: 15, z1: 21.5, y: 0, h: 6.6 },
+  floor2: { x0: 7.3, x1: 11, z0: 21.5, z1: 31, y: 3.4, h: 3.2 },
+};
+export const ZONES_OF = { hall1: ['hall1'], hall2: ['hall2'], wc: ['wc'], stairs: ['stairs', 'floor2'] }; // 산 공간 → 만들어지는 곳
+export const STAIRS = { steps: 17, rise: 3.4 };
+
+// 지금 서 있는 곳의 바닥 높이: 계단은 한 칸씩 올라가고, 계단 위는 2층이다
+export function floorY(x, z) {
+  const S = ZONES.stairs;
+  if (x < S.x0 || x > S.x1 || z < S.z0) return 0;
+  if (z >= S.z1) return STAIRS.rise;
+  const run = (S.z1 - S.z0) / STAIRS.steps;
+  const i = Math.min(STAIRS.steps - 1, Math.floor((z - S.z0) / run));
+  return ((i + 1) * STAIRS.rise) / STAIRS.steps;
+}
+
+// (x, z) 가 속한 공간(열린 공간만). 벽 두께나 문턱 위처럼 어디에도 속하지 않으면 가장 가까운 공간을 돌려준다.
+export function zoneAt(x, z, unlocked = []) {
+  const names = ['room', ...unlocked.flatMap((id) => ZONES_OF[id] || [])];
+  let best = 'room';
+  let bd = Infinity;
+  for (const k of names) {
+    const r = ZONES[k];
+    const d = Math.hypot(Math.max(r.x0 - x, 0, x - r.x1), Math.max(r.z0 - z, 0, z - r.z1));
+    if (d < bd) { bd = d; best = k; }
+  }
+  return best;
+}
 export const START = { x: -3.0, z: -0.2 }; // 쉼터에 들어서는 자리: 창가 쪽 열린 공간에서 칠판을 바라본다
 export const WALK = 3.0;
 
@@ -60,8 +97,13 @@ export const THEMES = {
 // 충돌: 방 안쪽으로 가두고, 가구와 겹치면 밀어낸다. 나는 걸어 다니는 친구도 피하고, 친구(NPC)는 가구만 피한다.
 //  colliders: 네모 { x, z, hw, hd } 또는 동그라미 { x, z, r } (ref 가 있으면 움직이는 사람의 그룹)
 export function resolve(p, colliders, r = PLAYER_R, npcMode = false) {
-  p.x = clamp(p.x, -ROOM.x + 0.6, ROOM.x - 0.6);
-  p.z = clamp(p.z, -ROOM.z + 0.7, ROOM.z - 0.55);
+  if (npcMode) { // 친구와 선생님은 교실 안에만 있는다
+    p.x = clamp(p.x, -ROOM.x + 0.6, ROOM.x - 0.6);
+    p.z = clamp(p.z, -ROOM.z + 0.7, ROOM.z - 0.55);
+  } else { // 나는 벽(충돌 상자)이 막아 준다. 이 범위는 만약을 위한 바깥 울타리
+    p.x = clamp(p.x, -ROOM.x - 0.2, 18);
+    p.z = clamp(p.z, -ROOM.z - 0.2, 32);
+  }
   for (const c of colliders) {
     if (c.r !== undefined) {
       if (c.ref && npcMode) continue; // 친구끼리는 따로 서로 비켜 준다

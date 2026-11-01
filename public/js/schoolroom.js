@@ -4,9 +4,10 @@
 //  - 선생님과 친구들은 스스로 걸어 다니고(길 찾기), 토끼와 마음 미션 자리는 그대로 있다
 import {
   ROOM, START, THEMES, PLAYER_LOOK, PARENTS, PARENT_SCALE, TEACHER_SCALE, KID_SCALE, FRIEND_SCALE,
-  clamp, damp, angleDelta, rand, pick, givenName, resolve, makeNav,
+  clamp, damp, angleDelta, rand, pick, givenName, resolve, makeNav, floorY,
 } from './world-shared.js';
 import { toolbox, characterKit, bake, disposeCharacter } from './character.js';
+import { buildHalls } from './schoolhall.js';
 
 // 둥근 네모 길
 const rr = (g, x, y, w, h, r) => {
@@ -22,7 +23,9 @@ const FONT = (px) => `700 ${px}px Jua, "Malgun Gothic", sans-serif`;
 
 // ────────────────────────────────────────────────────────────────
 // 장면: 교실, 가구, 친구와 선생님, 토끼, 빛과 먼지
-export function buildScene(T, { user, emoji, npcs, room, self }) {
+//  world: { catalog, unlocked, stars } 마음 쉼터 넓히기에서 열린 공간 (없으면 교실만)
+export function buildScene(T, { user, emoji, npcs, room, self, world = null }) {
+  const wInfo = world || { catalog: [], unlocked: [], stars: 0 };
   const scene = new T.Scene();
   scene.background = new T.Color(0xd6ecff);
   scene.fog = new T.Fog(0xd6ecff, 30, 130);
@@ -128,6 +131,9 @@ export function buildScene(T, { user, emoji, npcs, room, self }) {
   const sun = new T.DirectionalLight(0xfff4dc, 1.7);
   sun.position.set(-12, 9, 3);
   scene.add(sun);
+  const fill = new T.DirectionalLight(0xfff8ee, 0.8); // 반대쪽 벽과 복도 벽도 환하게
+  fill.position.set(12, 7, -3);
+  scene.add(fill);
   for (const [x, z] of [[-3.5, -2.5], [2.2, -3], [3.6, 2.4], [-3, 3.6], [1, 0.3]]) {
     const l = new T.PointLight(0xfff3e0, 8, 12, 2);
     l.position.set(x, 3.0, z);
@@ -169,7 +175,17 @@ export function buildScene(T, { user, emoji, npcs, room, self }) {
   const WALL = theme.wall;
   const BAND = theme.band;
   const WZ = ROOM.z * 2;
-  box(0.3, ROOM.h, WZ, WALL, ROOM.x + 0.15, ROOM.h / 2, 0);
+  // 오른쪽 벽: 복도로 나가는 문 자리(DZ ± 0.6)를 비워 둔다
+  const DZ = 4.7;
+  for (const [a, b] of [[-ROOM.z, DZ - 0.6], [DZ + 0.6, ROOM.z]]) {
+    box(0.3, ROOM.h, b - a, WALL, ROOM.x + 0.15, ROOM.h / 2, (a + b) / 2);
+    solid(ROOM.x + 0.15, (a + b) / 2, 0.15, (b - a) / 2);
+  }
+  box(0.3, ROOM.h - 2.2, 1.2, WALL, ROOM.x + 0.15, (ROOM.h + 2.2) / 2, DZ);
+  // 나머지 벽도 충돌 상자: 걸어 나가지 못한다
+  solid(-ROOM.x - 0.15, 0, 0.15, ROOM.z);
+  solid(0, -ROOM.z - 0.15, ROOM.x, 0.15);
+  solid(0, ROOM.z + 0.15, ROOM.x, 0.15);
   box(ROOM.x * 2, ROOM.h, 0.3, WALL, 0, ROOM.h / 2, -ROOM.z - 0.15);
   box(ROOM.x * 2, ROOM.h, 0.3, WALL, 0, ROOM.h / 2, ROOM.z + 0.15);
   box(0.3, 0.95, WZ, WALL, -ROOM.x - 0.15, 0.475, 0);
@@ -177,10 +193,12 @@ export function buildScene(T, { user, emoji, npcs, room, self }) {
   for (const [z0, z1] of [[-ROOM.z, -5.4], [-2.4, -1.5], [1.5, 2.4], [5.4, ROOM.z]]) {
     box(0.3, 1.6, z1 - z0, WALL, -ROOM.x - 0.15, 1.75, (z0 + z1) / 2);
   }
-  box(0.05, 0.95, WZ, BAND, ROOM.x - 0.02, 0.475, 0);
+  for (const [a, b] of [[-ROOM.z, DZ - 0.6], [DZ + 0.6, ROOM.z]]) {
+    box(0.05, 0.95, b - a, BAND, ROOM.x - 0.02, 0.475, (a + b) / 2);
+    box(0.06, 0.12, b - a, '#b7b2a6', ROOM.x - 0.03, 0.06, (a + b) / 2);
+  }
   box(ROOM.x * 2, 0.95, 0.05, BAND, 0, 0.475, -ROOM.z + 0.02);
   box(ROOM.x * 2, 0.95, 0.05, BAND, 0, 0.475, ROOM.z - 0.02);
-  box(0.06, 0.12, WZ, '#b7b2a6', ROOM.x - 0.03, 0.06, 0);
   box(ROOM.x * 2, 0.12, 0.06, '#b7b2a6', 0, 0.06, -ROOM.z + 0.03);
   box(ROOM.x * 2, 0.12, 0.06, '#b7b2a6', 0, 0.06, ROOM.z - 0.03);
 
@@ -559,8 +577,19 @@ export function buildScene(T, { user, emoji, npcs, room, self }) {
     g.fillStyle = '#8e99a4'; g.fillRect(26, 280, 14, 80);
     g.fillStyle = 'rgba(0,0,0,.08)'; g.fillRect(52, 300, 152, 170);
   });
-  panel(doorTex, 1.15, 2.1, RX - 0.02, 1.07, 4.7, -Math.PI / 2, true);
-  box(0.06, 2.2, 1.3, '#f1f2f4', ROOM.x - 0.03, 1.1, 4.7);
+  box(0.1, 0.1, 1.34, '#f1f2f4', ROOM.x - 0.02, 2.17, DZ);
+  box(0.1, 2.2, 0.07, '#f1f2f4', ROOM.x - 0.02, 1.1, DZ - 0.63);
+  box(0.1, 2.2, 0.07, '#f1f2f4', ROOM.x - 0.02, 1.1, DZ + 0.63);
+  const doorLeaf = new T.Group();
+  const leafBody = box(0.06, 2.1, 1.2, '#e9dcc4', ROOM.x - 0.08, 1.05, DZ, doorLeaf);
+  leafBody.material = M('#e9dcc4');
+  const leafFace = new T.Mesh(new T.PlaneGeometry(1.15, 2.1), track(new T.MeshLambertMaterial({ map: doorTex })));
+  leafFace.position.set(ROOM.x - 0.113, 1.05, DZ);
+  leafFace.rotation.y = -Math.PI / 2;
+  doorLeaf.add(leafFace);
+  scene.add(doorLeaf);
+  const doorCollider = { x: ROOM.x + 0.05, z: DZ, hw: 0.2, hd: 0.62 };
+  colliders.push(doorCollider);
 
   // ── 뒤쪽 벽: 사물함, 작품 게시판, 책장(독서 코너) ──
   const BZ = ROOM.z;
@@ -824,7 +853,7 @@ export function buildScene(T, { user, emoji, npcs, room, self }) {
   const nav = makeNav(colliders);
 
   // ── 나 ──
-  const kidDesc = { look: PLAYER_LOOK, tag: `${emoji} ${user.name}`, tagBg: '#fff7c2', scale: KID_SCALE(grade), role: 'kid' };
+  const kidDesc = { look: user.look || PLAYER_LOOK, tag: `${emoji} ${user.name}`, tagBg: '#fff7c2', scale: KID_SCALE(grade), role: 'kid' };
   const me = self || kidDesc;
   const player = kit.make(me.look, { name: me.tag, scale: me.scale, tagBg: me.tagBg, role: me.kind || 'kid' });
   scene.add(player);
@@ -1063,6 +1092,13 @@ export function buildScene(T, { user, emoji, npcs, room, self }) {
     n.dur = n.doing === 'write' ? rand(7, 12) : n.doing === 'gaze' ? rand(5, 10) : n.doing === 'look' ? rand(2, 4) : rand(2, 6);
   }
 
+  // ── 교실 밖 공간: 복도, 복도 2, 화장실, 2층 계단 (별로 연 것만) ──
+  const view = { unlocked: new Set(wInfo.unlocked), stars: wInfo.stars, catalog: wInfo.catalog };
+  const halls = buildHalls(T, {
+    scene, colliders, tb, theme, school, label: room?.label || '', catalog: wInfo.catalog, view, door: { leaf: doorLeaf, collider: doorCollider },
+  });
+  halls.init(wInfo.unlocked);
+
   // ── 토끼 (우리 반 토끼) ──
   const bgp = new T.Group();
   const white = M(0xfffaf5);
@@ -1175,7 +1211,7 @@ export function buildScene(T, { user, emoji, npcs, room, self }) {
   const humans = [];
 
   return {
-    scene, camera, player, colliders, stops, bunny, drawBoard, npcs: crowd, peers, syncPeers, grade, nav,
+    scene, camera, player, colliders, stops, bunny, drawBoard, npcs: crowd, peers, syncPeers, grade, nav, halls, view,
     animatePlayer(speed01, t) { swing(player, speed01, t); },
     animate(t, dt, pos, st) {
       humans.length = 0;
@@ -1188,10 +1224,12 @@ export function buildScene(T, { user, emoji, npcs, room, self }) {
         if (dd > 4) g.position.set(p.tx, 0, p.tz);
         else { g.position.x = damp(g.position.x, p.tx, 9, dt); g.position.z = damp(g.position.z, p.tz, 9, dt); }
         g.rotation.y += angleDelta(g.rotation.y, p.tr) * (1 - Math.exp(-10 * dt));
+        g.position.y = damp(g.position.y, floorY(g.position.x, g.position.z), 14, dt); // 계단을 오르내린다
         p.speed01 = damp(p.speed01, clamp(dd * 5, 0, 1), 10, dt);
         swing(g, p.speed01, t);
         humans.push(g.position);
       }
+      halls.update(t, dt);
       for (const n of crowd) brain(n, t, dt, humans);
       // 토끼: 러그 근처를 사뿐사뿐
       const bp = bunny.group.position;

@@ -7,7 +7,7 @@
 import { sfx } from './sfx.js';
 import { ANIMALS } from './avatar.js';
 import { confetti } from './fx.js';
-import { ROOM, START, WALK, PARENTS, PARENT_SCALE, clamp, damp, angleDelta, givenName, resolve } from './world-shared.js';
+import { ROOM, ZONES, START, WALK, PARENTS, PARENT_SCALE, clamp, damp, angleDelta, givenName, resolve, floorY, zoneAt } from './world-shared.js';
 import { loadThree } from './character.js';
 import { buildScene } from './schoolroom.js';
 
@@ -45,7 +45,8 @@ const WORDS = [
 // ────────────────────────────────────────────────────────────────
 // user: 이 교실의 주인(아이). visit: { role: 'mom' | 'dad' } 이면 부모님이 그 캐릭터로 같이 들어온 것.
 // room: server/rooms.js 의 교실 정보 { label, theme, grade }. presence: { sync(me), leave() } 이면 같이 있는 사람을 서로 본다.
-export async function startWorld({ user, preview = false, visit = null, room = null, npcs = [], presence = null, onDone }) {
+// worldInfo: { catalog, unlocked, stars } 별로 연 공간들. buy(id) 가 있으면 잠긴 문 앞에서 별로 열 수 있다 (async, 성공하면 { user } 를 돌려준다).
+export async function startWorld({ user, preview = false, visit = null, room = null, npcs = [], presence = null, worldInfo = null, buy = null, onDone }) {
   const root = document.createElement('div');
   root.className = 'world';
   root.innerHTML = `<div class="world-card"><div class="boot-clock">🌈</div><h2>${visit ? '교실에 들어가는 중…' : '마음 쉼터를 준비하는 중…'}</h2></div>`;
@@ -97,6 +98,7 @@ export async function startWorld({ user, preview = false, visit = null, room = n
       <div class="wh-bubble" id="w-bubble" hidden></div>
       <div class="wh-act" id="w-act" hidden></div>
       <div class="wh-joy" id="w-joy" aria-label="움직이기"><div class="wh-knob" id="w-knob"></div></div>
+      <button class="wh-flip" id="w-flip" aria-label="뒤돌아보기" title="뒤돌아보기">🔄</button>
       <div class="wh-hint" id="w-hint">오른쪽을 드래그하면 시점이 돌아가요</div>
     </div>
     <div class="world-card" id="w-card"></div>`;
@@ -106,8 +108,9 @@ export async function startWorld({ user, preview = false, visit = null, room = n
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.6));
 
   // ───────── 장면 만들기 ─────────
-  const world = buildScene(T, { user, emoji, npcs, room, self });
-  const { scene, camera, player, colliders, stops, bunny } = world;
+  const world = buildScene(T, { user, emoji, npcs, room, self, world: worldInfo });
+  const { scene, camera, player, colliders, stops, bunny, halls, view } = world;
+  const canBuy = Boolean(buy) && !visit;
   const crowd = world.npcs;
 
   const state = {
@@ -190,6 +193,7 @@ export async function startWorld({ user, preview = false, visit = null, room = n
     sfx.setMuted(!sfx.muted);
     $('#w-mute').textContent = sfx.muted ? '🔇' : '🔊';
   });
+  $('#w-flip').addEventListener('click', () => { state.yaw += Math.PI; sfx.tap(); });
   $('#w-exit').addEventListener('click', () => {
     if (!state.running) return;
     if (visit) { state.running = false; finishOnce({ visit: true, stars: 0, seconds: Math.round(state.elapsed), skipped: false }); } else finishTour('exit');
@@ -241,6 +245,8 @@ export async function startWorld({ user, preview = false, visit = null, room = n
     if (b) chooseWord(WORDS[Number(b.dataset.word)]);
     const s = e.target.closest('[data-say]');
     if (s) speak(Number(s.dataset.say));
+    const bb = e.target.closest('[data-buy]');
+    if (bb) buyDoor(bb.dataset.buy, bb);
   });
 
   // ───────── 한 프레임 ─────────
@@ -279,6 +285,7 @@ export async function startWorld({ user, preview = false, visit = null, room = n
       const want = Math.atan2(mx, mz);
       player.rotation.y += angleDelta(player.rotation.y, want) * (1 - Math.exp(-12 * dt));
     }
+    pos.y = damp(pos.y, floorY(pos.x, pos.z), 16, dt); // 계단은 한 칸씩 올라간다
     lastSpeed = speed / WALK;
     world.animatePlayer(lastSpeed, t);
     world.animate(t, dt, pos, state);
@@ -286,29 +293,30 @@ export async function startWorld({ user, preview = false, visit = null, room = n
     if (state.running) { if (visit) handleVisit(); else handleStops(dt); }
     placeSays(t);
 
-    // 카메라 (뒤에서 따라가기). 벽에 막히면 거리를 줄이고 조금 더 위에서 내려다본다
-    const baseDist = 5.0;
+    // 카메라 (뒤에서 따라가기). 지금 있는 공간 안에 머물고, 벽에 막히면 거리를 줄이고 조금 더 위에서 내려다본다
+    const zr = ZONES[zoneAt(pos.x, pos.z, [...view.unlocked])];
+    const baseDist = zr === ZONES.room ? 5.0 : 3.6;
     const ch = Math.cos(state.pitch);
     const hx = Math.sin(state.yaw) * ch * baseDist;
     const hz = Math.cos(state.yaw) * ch * baseDist;
     let fit = 1;
-    if (hx > 0.01) fit = Math.min(fit, (ROOM.x - 0.6 - pos.x) / hx);
-    else if (hx < -0.01) fit = Math.min(fit, (-ROOM.x + 0.6 - pos.x) / hx);
-    if (hz > 0.01) fit = Math.min(fit, (ROOM.z - 0.6 - pos.z) / hz);
-    else if (hz < -0.01) fit = Math.min(fit, (-ROOM.z + 0.6 - pos.z) / hz);
+    if (hx > 0.01) fit = Math.min(fit, (zr.x1 - 0.6 - pos.x) / hx);
+    else if (hx < -0.01) fit = Math.min(fit, (zr.x0 + 0.6 - pos.x) / hx);
+    if (hz > 0.01) fit = Math.min(fit, (zr.z1 - 0.6 - pos.z) / hz);
+    else if (hz < -0.01) fit = Math.min(fit, (zr.z0 + 0.6 - pos.z) / hz);
     fit = clamp(fit, 0.3, 1);
     const pitchEff = state.pitch + (1 - fit) * 0.55;
     const dist = baseDist * fit;
     const cp = Math.cos(pitchEff) * dist;
-    const target = tmp.set(pos.x + Math.sin(state.yaw) * cp, 1.0 + Math.sin(pitchEff) * dist, pos.z + Math.cos(state.yaw) * cp);
-    target.x = clamp(target.x, -ROOM.x + 0.5, ROOM.x - 0.5);
-    target.z = clamp(target.z, -ROOM.z + 0.5, ROOM.z - 0.5);
-    target.y = clamp(target.y, 0.8, ROOM.h - 0.3);
+    const target = tmp.set(pos.x + Math.sin(state.yaw) * cp, pos.y + 1.0 + Math.sin(pitchEff) * dist, pos.z + Math.cos(state.yaw) * cp);
+    target.x = clamp(target.x, zr.x0 + 0.5, zr.x1 - 0.5);
+    target.z = clamp(target.z, zr.z0 + 0.5, zr.z1 - 0.5);
+    target.y = clamp(target.y, pos.y + 0.8, zr.y + zr.h - 0.3);
     state.camPos.x = damp(state.camPos.x, target.x, 7, dt);
     state.camPos.y = damp(state.camPos.y, target.y, 7, dt);
     state.camPos.z = damp(state.camPos.z, target.z, 7, dt);
     camera.position.copy(state.camPos);
-    camera.lookAt(pos.x, 1.0, pos.z);
+    camera.lookAt(pos.x, pos.y + 1.0, pos.z);
     camera.updateMatrixWorld(true);
 
     if (state.running && t - state.lastHudAt > 0.2) { state.lastHudAt = t; updateHud(); }
@@ -366,7 +374,11 @@ export async function startWorld({ user, preview = false, visit = null, room = n
     if (active === 'board') {
       setAct('board', `<div class="act-card"><div class="act-icon">✏️</div><b>고마운 마음을 골라요</b><div class="act-words">${WORDS.map((w, i) => `<button class="btn btn-white small" data-word="${i}">${w.icon} ${w.text}</button>`).join('')}</div></div>`);
     }
-    if (!active && actKey) setAct('', null);
+    if (!active) {
+      const b = nearBarrier();
+      if (b) setAct(`barrier:${b.id}:${view.stars}:${view.unlocked.size}`, barrierCard(b));
+      else if (actKey) setAct('', null);
+    }
     state.acting = active ? { id: active } : null;
 
     // 토끼: 가까이 가만히 있으면 친구가 된다
@@ -388,6 +400,52 @@ export async function startWorld({ user, preview = false, visit = null, room = n
         if (state.greeted.size <= GREET_STARS) gainStar(`greet${state.greeted.size}`, `${near.data.name}${hasFinal(near.data.name) ? '과' : '와'} 인사했어요`);
       }
     } else bubble.hidden = true;
+  }
+
+  // ───────── 별로 공간 열기: 잠긴 문·공사 중 가림막 앞에서 ─────────
+  const itemOf = (id) => view.catalog.find((c) => c.id === id);
+  function nearBarrier() {
+    let best = null;
+    let bd = 1e9;
+    for (const b of halls.barriers) {
+      const d = Math.hypot(pos.x - b.x, pos.z - b.z);
+      if (d < b.r && d < bd) { bd = d; best = b; }
+    }
+    return best;
+  }
+  function barrierCard(b) {
+    const c = itemOf(b.id);
+    const prev = c.needs ? itemOf(c.needs) : null;
+    const title = `<div class="act-icon">🔒</div><b>${c.icon} ${esc(c.name)} 열기</b>`;
+    if (prev && !view.unlocked.has(prev.id)) return `<div class="act-card">${title}<small>먼저 앞 공간(${esc(prev.name)})을 열어야 해요</small></div>`;
+    if (!canBuy) return `<div class="act-card">${title}<small>마음 별 ⭐${c.cost}개로 열 수 있어요</small></div>`;
+    if (view.stars < c.cost) {
+      return `<div class="act-card">${title}<small>⭐${c.cost}개가 필요해요 · 지금 ⭐${view.stars}개 (${c.cost - view.stars}개 더!)</small></div>`;
+    }
+    return `<div class="act-card">${title}<small>쓸 수 있는 별 ⭐${view.stars}개 중 ⭐${c.cost}개를 써요</small><button class="btn btn-yellow" data-buy="${b.id}">🔓 열기 (⭐${c.cost})</button></div>`;
+  }
+  let buying = false;
+  async function buyDoor(id, btn) {
+    if (!canBuy || buying) return;
+    buying = true;
+    btn.disabled = true;
+    try {
+      const r = await buy(id);
+      const w = r.user && r.user.world;
+      if (w) view.stars = w.stars;
+      halls.unlock(id);
+      sfx.success();
+      confetti({ count: 70, x: 0.5, y: 0.5, power: 0.9, emojis: ['⭐', '🔓', '✨'] });
+      toastNote(`🎉 열렸어요! ${itemOf(id).icon} ${itemOf(id).name}`);
+      setAct('', null);
+      actKey = '';
+    } catch (err) {
+      btn.disabled = false;
+      sfx.error();
+      toastNote(err.message || '열지 못했어요');
+    } finally {
+      buying = false;
+    }
   }
 
   // 인사를 나눌 수 있는 상대: 선생님·친구, 그리고 아이 화면에서는 같이 온 엄마·아빠
@@ -428,6 +486,7 @@ export async function startWorld({ user, preview = false, visit = null, room = n
     const near = nearTalker();
     if (near) showNear(near); else bubble.hidden = true;
   }
+  // (부모님이 들어온 화면에서는 공간을 사지 않는다. 아이가 연 곳까지만 걸어 볼 수 있다.)
 
   // ───────── 같이 있는 사람: 위치 주고받기, 말풍선 ─────────
   const says = new Map(); // 사람 id('me' 는 나) → { el, until, peer }
@@ -628,7 +687,8 @@ export async function startWorld({ user, preview = false, visit = null, room = n
           <li>👆 화면을 드래그하면 시점이 돌아가요</li>
           <li>⭐ 마음 별 ${TOUR_STARS}개를 모아 보세요</li>
         </ul>
-        ${preview ? '<p class="wi-note">👪 미리보기예요 (마음 별은 저장되지 않아요)</p>' : ''}
+        ${canBuy && view.catalog.length ? `<p class="wi-note">🪙 쓸 수 있는 별 <b>⭐${view.stars}</b>개 · 교실 오른쪽 문 밖에 새 공간이 기다려요</p>` : ''}
+        ${preview ? `<p class="wi-note">${canBuy ? '🌈 구경하는 시간이에요 (마음 별은 저장되지 않아요)' : '👪 미리보기예요 (마음 별은 저장되지 않아요)'}</p>` : ''}
         <button class="btn btn-yellow big" id="w-go">🚪 교실에 들어가기</button>
         <button class="back-link" id="w-skip">다음에 할래요</button>
       </div>`;
@@ -708,7 +768,7 @@ export async function startWorld({ user, preview = false, visit = null, room = n
 
   showIntro();
   // 개발·점검용: localStorage.htf_debug = '1' 이면 밖에서 상태를 읽고 한 프레임씩 돌려 볼 수 있다
-  ctl.debug = { state, input, pos, player, camera, scene, stops, crowd, bunny, colliders, update, renderer, beginTour, finishTour, gainStar, nextGoal, world, applyPeers, speak, says, talkers };
+  ctl.debug = { state, input, pos, player, camera, scene, stops, crowd, bunny, colliders, update, renderer, beginTour, finishTour, gainStar, nextGoal, world, applyPeers, speak, says, talkers, halls, view, buyDoor, nearBarrier };
   try { if (localStorage.getItem('htf_debug') === '1') window.__htfWorld = ctl; } catch (_) { /* 무시 */ }
   return ctl;
 }

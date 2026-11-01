@@ -11,6 +11,7 @@ const npcsLib = require('./npcs');
 const { roomFor } = require('./rooms');
 const presence = require('./presence');
 const hanjaLib = require('./hanja');
+const worldLib = require('./world');
 const compression = require('compression');
 
 const PORT = process.env.PORT || 3000;
@@ -51,6 +52,8 @@ const publicUser = (u) => ({
   tourCount: u.tour_count || 0, // 마음 쉼터 보상: 다녀온 횟수와 모은 마음 별
   tourStars: u.tour_stars || 0,
   hanja: hanjaLib.publicHanja(u), // 한문 6급 과정 진도
+  look: npcsLib.parseLook(u.look), // 아이가 꾸민 교실 캐릭터 (없으면 기본 모습)
+  world: worldLib.publicWorld(u), // 마음 쉼터 넓히기: 쓸 수 있는 별, 연 공간, 공간 목록
 });
 
 const publicItem = (h) => ({
@@ -211,6 +214,12 @@ async function main() {
       if (!a) throw new HttpError(400, '캐릭터를 다시 골라 주세요');
       avatarJson = JSON.stringify(a);
     }
+    let lookJson = u.look;
+    if (b.look !== undefined) {
+      const l = npcsLib.sanitizeLook(b.look);
+      if (!l) throw new HttpError(400, '교실 캐릭터를 다시 골라 주세요');
+      lookJson = JSON.stringify(l);
+    }
     let pinHash = u.pin_hash;
     if (b.newPin !== undefined) {
       if (!/^\d{4}$/.test(String(b.newPin))) throw new HttpError(400, '새 비밀번호는 숫자 4자리예요');
@@ -218,9 +227,9 @@ async function main() {
       pinHash = auth.hashPin(String(b.newPin));
     }
     await db.query(
-      `UPDATE users SET birth = $1, school = $2, class_name = $3, timer_min = $4, pin_hash = $5, avatar = $6, updated_at = $7
-       WHERE id = $8`,
-      [birth, school, className, timerMin, pinHash, avatarJson, Date.now(), u.id]
+      `UPDATE users SET birth = $1, school = $2, class_name = $3, timer_min = $4, pin_hash = $5, avatar = $6, look = $7, updated_at = $8
+       WHERE id = $9`,
+      [birth, school, className, timerMin, pinHash, avatarJson, lookJson, Date.now(), u.id]
     );
     const [fresh] = await db.query('SELECT * FROM users WHERE id = $1', [u.id]);
     res.json({ user: publicUser(fresh) });
@@ -715,6 +724,23 @@ async function main() {
     res.json({ user: publicUser(fresh), gained: stars });
   });
 
+  // 마음 별로 새 공간을 한 곳 연다 (앞 공간을 먼저 열어야 하고, 별이 모자라면 못 산다)
+  api.post('/world/buy', async (req, res) => {
+    const u = req.user;
+    const id = String(req.body.id || '');
+    const c = worldLib.checkBuy(u, id);
+    if (c.error) throw new HttpError(c.status, c.error);
+    const next = worldLib.serialize([...c.world.unlocked, id]);
+    // 별과 열린 공간이 그 사이에 바뀌지 않았을 때만 (두 화면에서 동시에 눌러도 한 번만 산다)
+    const rows = await db.query(
+      `UPDATE users SET tour_spent = tour_spent + $1, world_unlocked = $2, updated_at = $3
+       WHERE id = $4 AND world_unlocked = $5 AND tour_stars - tour_spent >= $1 RETURNING *`,
+      [c.item.cost, next, Date.now(), u.id, u.world_unlocked || '']
+    );
+    if (!rows.length) throw new HttpError(409, '다시 한 번 눌러 주세요');
+    res.json({ user: publicUser(rows[0]), item: c.item });
+  });
+
   api.get('/photos/:id', async (req, res) => {
     const [p] = await db.query('SELECT mime, data FROM photos WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
     if (!p) throw new HttpError(404, '사진을 찾을 수 없어요');
@@ -798,7 +824,7 @@ async function main() {
   admin.post('/kids/:name/clear-records', async (req, res) => {
     const u = await kidFromParam(req);
     await wipeRecords(u.id);
-    await db.query('UPDATE users SET tour_count = 0, tour_stars = 0 WHERE id = $1', [u.id]); // 마음 별도 처음부터
+    await db.query("UPDATE users SET tour_count = 0, tour_stars = 0, tour_spent = 0, world_unlocked = '' WHERE id = $1", [u.id]); // 마음 별과 연 공간도 처음부터
     res.json({ ok: true });
   });
 
@@ -904,8 +930,13 @@ async function main() {
 
   admin.get('/kids/:name/classroom', async (req, res) => {
     const kid = kidNameFromParam(req);
-    const [u] = await db.query('SELECT class_name FROM users WHERE name = $1', [kid]);
-    res.json({ npcs: await listNpcs(kid), room: roomFor(kid, u && u.class_name) });
+    const [u] = await db.query('SELECT * FROM users WHERE name = $1', [kid]);
+    res.json({
+      npcs: await listNpcs(kid),
+      room: roomFor(kid, u && u.class_name),
+      look: u ? npcsLib.parseLook(u.look) : null,
+      world: u ? worldLib.publicWorld(u) : { stars: 0, earned: 0, spent: 0, unlocked: [], catalog: worldLib.CATALOG },
+    });
   });
 
   // 엄마·아빠 캐릭터로 아이의 교실에 같이 들어간다. sid 는 이 화면이 만든 무작위 값(같은 사람의 위치를 이어 붙인다)
@@ -926,6 +957,32 @@ async function main() {
   admin.post('/kids/:name/presence/leave', (req, res) => {
     presence.leave(kidNameFromParam(req), presenceId(req.body));
     res.json({ ok: true });
+  });
+
+  // 부모님이 별을 선물하거나(addStars) 공간을 열어 주거나(unlock: 앞 공간까지 함께), 처음으로 되돌린다(reset: 쓴 별도 돌려줌)
+  admin.post('/kids/:name/world', async (req, res) => {
+    const u = await kidFromParam(req);
+    const b = req.body;
+    let earned = u.tour_stars || 0;
+    let spent = u.tour_spent || 0;
+    let unlocked = worldLib.parseUnlocked(u.world_unlocked);
+    if (b.addStars !== undefined) {
+      const n = Math.round(Number(b.addStars));
+      if (!(n >= -200 && n <= 200)) throw new HttpError(400, '별은 -200 ~ 200 사이로 정해요');
+      earned = Math.max(spent, earned + n); // 이미 쓴 별보다 적어질 수는 없다
+    }
+    if (b.unlock !== undefined) {
+      const at = worldLib.IDS.indexOf(String(b.unlock));
+      if (at < 0) throw new HttpError(400, '그런 공간은 없어요');
+      unlocked = worldLib.IDS.slice(0, at + 1);
+    }
+    if (b.reset) { unlocked = []; spent = 0; }
+    await db.query(
+      'UPDATE users SET tour_stars = $1, tour_spent = $2, world_unlocked = $3, updated_at = $4 WHERE id = $5',
+      [earned, spent, worldLib.serialize(unlocked), Date.now(), u.id]
+    );
+    const [fresh] = await db.query('SELECT * FROM users WHERE id = $1', [u.id]);
+    res.json({ world: worldLib.publicWorld(fresh) });
   });
 
   admin.post('/kids/:name/classroom', async (req, res) => {

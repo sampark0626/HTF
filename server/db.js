@@ -19,6 +19,10 @@ CREATE TABLE IF NOT EXISTS users (
 ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS tour_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS tour_stars INTEGER NOT NULL DEFAULT 0;
+-- 마음 쉼터 넓히기: tour_spent 는 공간을 사는 데 쓴 별, world_unlocked 는 연 공간 id(쉼표), look 은 아이가 꾸민 교실 캐릭터(JSON)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS tour_spent INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS world_unlocked TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS look TEXT;
 -- 한문 6급 과정: hanja_on NULL 이면 이름 기준 기본값, 1 켬, 0 끔 / hanja_day 는 다음에 공부할 날 / hanja_last 는 마지막으로 끝낸 날(YYYY-MM-DD, 한국 시간)
 ALTER TABLE users ADD COLUMN IF NOT EXISTS hanja_on INTEGER;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS hanja_day INTEGER NOT NULL DEFAULT 1;
