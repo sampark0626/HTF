@@ -23,6 +23,9 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS tour_stars INTEGER NOT NULL DEFAULT 0
 ALTER TABLE users ADD COLUMN IF NOT EXISTS tour_spent INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS world_unlocked TEXT NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS look TEXT;
+-- 마음 쉼터 놀이: tour_helped 는 말썽 친구를 다정하게 타일러 도와준 횟수(별로도 쌓인다), board 는 아이가 칠판에 그린 낙서(PNG data URL)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS tour_helped INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS board TEXT;
 -- 한문 6급 과정: hanja_on NULL 이면 이름 기준 기본값, 1 켬, 0 끔 / hanja_day 는 다음에 공부할 날 / hanja_last 는 마지막으로 끝낸 날(YYYY-MM-DD, 한국 시간)
 ALTER TABLE users ADD COLUMN IF NOT EXISTS hanja_on INTEGER;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS hanja_day INTEGER NOT NULL DEFAULT 1;

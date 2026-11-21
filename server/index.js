@@ -12,6 +12,7 @@ const { roomFor } = require('./rooms');
 const presence = require('./presence');
 const hanjaLib = require('./hanja');
 const worldLib = require('./world');
+const boardLib = require('./board');
 const compression = require('compression');
 
 const PORT = process.env.PORT || 3000;
@@ -22,6 +23,7 @@ const kidIndex = (name) => Math.max(0, KIDS.indexOf(name));
 const MAX_PHOTO_BYTES = 3 * 1024 * 1024;
 const MAX_PENDING = 30;
 const TOUR_MAX_STARS = 7; // public/js/world.js 의 마음 별 개수와 같아야 한다
+const TOUR_MAX_HELP = 5; // 말썽 친구를 타일러 받는 별. public/js/world.js 의 TOUR_HELP 와 같아야 한다
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -51,6 +53,7 @@ const publicUser = (u) => ({
   avatar: avatars.parseAvatar(u.avatar, kidIndex(u.name)),
   tourCount: u.tour_count || 0, // 마음 쉼터 보상: 다녀온 횟수와 모은 마음 별
   tourStars: u.tour_stars || 0,
+  tourHelped: u.tour_helped || 0, // 말썽 친구를 다정하게 타일러 도와준 횟수
   hanja: hanjaLib.publicHanja(u), // 한문 6급 과정 진도
   look: npcsLib.parseLook(u.look), // 아이가 꾸민 교실 캐릭터 (없으면 기본 모습)
   world: worldLib.publicWorld(u), // 마음 쉼터 넓히기: 쓸 수 있는 별, 연 공간, 공간 목록
@@ -701,7 +704,15 @@ async function main() {
   }
 
   api.get('/classroom', async (req, res) => {
-    res.json({ npcs: await listNpcs(req.user.name), room: roomFor(req.user.name, req.user.class_name) });
+    res.json({ npcs: await listNpcs(req.user.name), room: roomFor(req.user.name, req.user.class_name), board: req.user.board || '' });
+  });
+
+  // 칠판 낙서 저장: 아이가 쉼터 칠판에 그린 그림(PNG data URL). 빈 글이면 지운다
+  api.put('/board', async (req, res) => {
+    const c = boardLib.check(req.body.png);
+    if (c.error) throw new HttpError(400, c.error);
+    await db.query('UPDATE users SET board = $1, updated_at = $2 WHERE id = $3', [c.value || null, Date.now(), req.user.id]);
+    res.json({ ok: true });
   });
 
   // 교실에서 부모님과 같이 있기: 내 위치를 알리고 같은 교실의 다른 사람(엄마·아빠)을 받는다
@@ -713,15 +724,16 @@ async function main() {
     res.json({ ok: true });
   });
 
-  // 숙제를 모두 클리어한 보상 "마음 쉼터" 3D 투어를 마쳤을 때: 마음 별(0~7)을 모은다
+  // 숙제를 모두 클리어한 보상 "마음 쉼터" 3D 투어를 마쳤을 때: 마음 별(0~7)과, 말썽 친구를 타일러 받은 별(0~5)을 모은다
   api.post('/tour/complete', async (req, res) => {
     const stars = Math.min(TOUR_MAX_STARS, Math.max(0, Math.round(Number(req.body.stars)) || 0));
+    const helped = Math.min(TOUR_MAX_HELP, Math.max(0, Math.round(Number(req.body.helped)) || 0));
     await db.query(
-      'UPDATE users SET tour_count = tour_count + 1, tour_stars = tour_stars + $1, updated_at = $2 WHERE id = $3',
-      [stars, Date.now(), req.user.id]
+      'UPDATE users SET tour_count = tour_count + 1, tour_stars = tour_stars + $1, tour_helped = tour_helped + $2, updated_at = $3 WHERE id = $4',
+      [stars + helped, helped, Date.now(), req.user.id]
     );
     const [fresh] = await db.query('SELECT * FROM users WHERE id = $1', [req.user.id]);
-    res.json({ user: publicUser(fresh), gained: stars });
+    res.json({ user: publicUser(fresh), gained: stars + helped, helped });
   });
 
   // 마음 별로 새 공간을 한 곳 연다 (앞 공간을 먼저 열어야 하고, 별이 모자라면 못 산다)
@@ -824,7 +836,7 @@ async function main() {
   admin.post('/kids/:name/clear-records', async (req, res) => {
     const u = await kidFromParam(req);
     await wipeRecords(u.id);
-    await db.query("UPDATE users SET tour_count = 0, tour_stars = 0, tour_spent = 0, world_unlocked = '' WHERE id = $1", [u.id]); // 마음 별과 연 공간도 처음부터
+    await db.query("UPDATE users SET tour_count = 0, tour_stars = 0, tour_helped = 0, tour_spent = 0, world_unlocked = '' WHERE id = $1", [u.id]); // 마음 별과 연 공간도 처음부터 (칠판 낙서는 아이의 그림이라 그대로 둔다)
     res.json({ ok: true });
   });
 
@@ -935,6 +947,7 @@ async function main() {
       npcs: await listNpcs(kid),
       room: roomFor(kid, u && u.class_name),
       look: u ? npcsLib.parseLook(u.look) : null,
+      board: (u && u.board) || '',
       world: u ? worldLib.publicWorld(u) : { stars: 0, earned: 0, spent: 0, unlocked: [], catalog: worldLib.CATALOG },
     });
   });

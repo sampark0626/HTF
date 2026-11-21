@@ -1423,10 +1423,10 @@ async function runHanja({ mode = 'auto', day = null } = {}) {
 
 // 마음 쉼터(3D 교실 투어): 필요할 때만 불러온다. 끝나면 onClose({ stars, seconds, skipped })
 // room: 이 아이의 교실(문패·분위기), visit: 부모님이 엄마/아빠로 같이 들어올 때 { role }, presence: 같이 있는 사람과 위치를 주고받는 연결
-async function openTour({ user, preview = false, visit = null, room = null, npcs = [], presence = null, worldInfo = null, buy = null, onClose }) {
+async function openTour({ user, preview = false, visit = null, room = null, npcs = [], presence = null, worldInfo = null, buy = null, board = '', saveBoard = null, onClose }) {
   try {
     const { startWorld } = await import('./world.js');
-    await startWorld({ user, preview, visit, room, npcs, presence, worldInfo, buy, onDone: onClose });
+    await startWorld({ user, preview, visit, room, npcs, presence, worldInfo, buy, board, saveBoard, onDone: onClose });
   } catch (err) {
     console.warn('[tour]', err);
     toast('쉼터를 열지 못했어요. 잠시 뒤에 다시 해 봐요', 'err');
@@ -1499,13 +1499,15 @@ function screenFinish(reason, summary, { returning = false } = {}) {
         room: cls.room,
         worldInfo: state.user.world,
         buy: buyWorld,
+        board: cls.board,
+        saveBoard: (png) => api.saveBoard(png),
         // 부모님이 같은 교실에 들어와 있으면 서로 볼 수 있다
         presence: { sync: (me) => api.presence(me), leave: () => api.presenceLeave() },
         onClose: async (res) => {
           if (!res.skipped && !state.tourReward) {
-            state.tourReward = { gained: res.stars };
+            state.tourReward = { gained: res.stars + (res.helped || 0) };
             try {
-              Object.assign(state.user, (await api.tourComplete(res.stars, res.seconds)).user);
+              Object.assign(state.user, (await api.tourComplete(res.stars, res.seconds, res.helped || 0)).user);
             } catch (err) {
               toast(err.message, 'err');
             }
@@ -1594,7 +1596,7 @@ function screenMyPage() {
         sfx.unlock();
         sfx.pop();
         const cls = await api.classroom().catch(() => ({ npcs: [], room: null }));
-        openTour({ user: state.user, preview: true, npcs: cls.npcs, room: cls.room, worldInfo: state.user.world, buy: buyWorld, onClose: () => screenMyPage() });
+        openTour({ user: state.user, preview: true, npcs: cls.npcs, room: cls.room, worldInfo: state.user.world, buy: buyWorld, board: cls.board, saveBoard: (png) => api.saveBoard(png), onClose: () => screenMyPage() });
       }
     };
   }
@@ -1723,7 +1725,7 @@ function screenMyPage() {
   function paneInfo() {
     pane.innerHTML = `
       <form class="card form-card" id="form" autocomplete="off" novalidate style="width:100%">
-        <div style="text-align:center"><span class="mind-stars">🌈 마음 쉼터 ${u.tourCount || 0}번 다녀옴 · ⭐ 마음 별 ${u.tourStars || 0}개</span></div>
+        <div style="text-align:center"><span class="mind-stars">🌈 마음 쉼터 ${u.tourCount || 0}번 다녀옴 · ⭐ 마음 별 ${u.tourStars || 0}개${u.tourHelped ? ` · 🌟 친구 도우미 ${u.tourHelped}번` : ''}</span></div>
         <div class="field"><label for="nm">🙋 이름</label><input id="nm" value="${esc(u.name)}" disabled></div>
         ${birthFields(u.birth)}
         <div class="field"><label for="school">🏫 학교</label><input id="school" maxlength="40" value="${esc(u.school)}"></div>
@@ -2326,6 +2328,7 @@ async function enterClassroom(name, back) {
     room: cls.room,
     npcs: cls.npcs,
     worldInfo: cls.world,
+    board: cls.board,
     presence: { sync: (me) => api.adminPresence(name, { ...me, sid, role }), leave: () => api.adminPresenceLeave(name, { sid, role }) },
     onClose: () => back(),
   });
@@ -2338,8 +2341,9 @@ async function screenParentClassroom(name) {
   let room;
   let look;
   let world;
+  let board;
   try {
-    ({ npcs, room, look, world } = await api.adminClassroom(name));
+    ({ npcs, room, look, world, board } = await api.adminClassroom(name));
   } catch (err) {
     toast(err.message, 'err');
     if (err.status === 401) screenParentLogin(); else screenParent();
@@ -2424,7 +2428,7 @@ async function screenParentClassroom(name) {
     sfx.pop();
     const avatar = (state.config.kids.find((k) => k.name === name) || {}).avatar || { animal: 0, color: 0, acc: 0 };
     // 이 아이가 보게 될 모습 그대로 둘러본다 (별은 저장되지 않는다)
-    openTour({ user: { name, avatar, look }, preview: true, room, npcs, worldInfo: world, onClose: () => screenParentClassroom(name) });
+    openTour({ user: { name, avatar, look }, preview: true, room, npcs, worldInfo: world, board, onClose: () => screenParentClassroom(name) });
   };
   $('#visit', el).onclick = () => { sfx.tap(); enterClassroom(name, () => screenParentClassroom(name)); };
   $('#reset', el).onclick = async () => {

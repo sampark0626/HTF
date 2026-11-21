@@ -8,6 +8,8 @@ import {
 } from './world-shared.js';
 import { toolbox, characterKit, bake, disposeCharacter } from './character.js';
 import { buildHalls } from './schoolhall.js';
+import { createBoard, BOARD_W, BOARD_H } from './board.js';
+import { RULES, ruleOf } from './rules.js';
 
 // 둥근 네모 길
 const rr = (g, x, y, w, h, r) => {
@@ -24,7 +26,8 @@ const FONT = (px) => `700 ${px}px Jua, "Malgun Gothic", sans-serif`;
 // ────────────────────────────────────────────────────────────────
 // 장면: 교실, 가구, 친구와 선생님, 토끼, 빛과 먼지
 //  world: { catalog, unlocked, stars } 마음 쉼터 넓히기에서 열린 공간 (없으면 교실만)
-export function buildScene(T, { user, emoji, npcs, room, self, world = null }) {
+//  boardImage: 아이가 칠판에 남긴 낙서(PNG data URL, 없으면 빈 칠판)
+export function buildScene(T, { user, emoji, npcs, room, self, world = null, boardImage = '' }) {
   const wInfo = world || { catalog: [], unlocked: [], stars: 0 };
   const scene = new T.Scene();
   scene.background = new T.Color(0xd6ecff);
@@ -338,42 +341,31 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null }) {
 
   // ── 앞쪽 벽: 하얀 칠판, TV, 알림판, 시계, 반 이름 ──
   const FZ = -ROOM.z; // 앞벽의 안쪽 면
+  // 칠판: 아이의 낙서 + 고마운 말 + 오른쪽 구석의 "우리 반 약속" (board.js). 낙서는 PNG 로 저장했다가 다시 불러온다.
   const boardCanvas = document.createElement('canvas');
-  boardCanvas.width = 1024;
-  boardCanvas.height = 280;
-  const bctx = boardCanvas.getContext('2d');
+  boardCanvas.width = BOARD_W;
+  boardCanvas.height = BOARD_H;
   const boardTex = new T.CanvasTexture(boardCanvas);
   boardTex.colorSpace = T.SRGBColorSpace;
   boardTex.anisotropy = 4;
-  function drawBoard(word) {
-    const w = boardCanvas.width;
-    const h = boardCanvas.height;
-    const gr = bctx.createLinearGradient(0, 0, w, h);
-    gr.addColorStop(0, '#fdfdfb');
-    gr.addColorStop(1, '#eef0ee');
-    bctx.fillStyle = gr;
-    bctx.fillRect(0, 0, w, h);
-    // 지우다 만 마커 자국
-    bctx.fillStyle = 'rgba(120,130,140,.07)';
-    for (let i = 0; i < 9; i += 1) bctx.fillRect(Math.random() * w, Math.random() * h, 160, 10);
-    bctx.textAlign = 'center';
-    bctx.fillStyle = '#2f5fd0';
-    bctx.font = FONT(60);
-    bctx.fillText('오늘도 수고했어요 ⭐', w / 2, 92);
-    bctx.font = FONT(68);
-    bctx.fillStyle = word ? '#e0483f' : 'rgba(90,100,110,.6)';
-    bctx.fillText(word ? `“${word}”` : '고마운 마음을 여기에 써 봐요', w / 2, 200);
-    bctx.font = '44px sans-serif';
-    bctx.fillText('🌼', 70, 240);
-    bctx.fillText('☁️', w - 80, 80);
-    bctx.fillText('✏️', w - 70, 240);
-    boardTex.needsUpdate = true;
+  const board = createBoard({ canvas: boardCanvas, rules: RULES, onChange: () => { boardTex.needsUpdate = true; } });
+  board.compose();
+  if (boardImage) {
+    const img = new Image();
+    img.onload = () => board.load(img);
+    img.src = boardImage;
   }
-  drawBoard('');
+  const drawBoard = (word) => board.setWord(word);
   box(4.5, 1.38, 0.06, '#d4d8dc', 0.1, 1.68, FZ + 0.03);
   const boardMesh = new T.Mesh(new T.PlaneGeometry(4.3, 1.17), new T.MeshBasicMaterial({ map: boardTex }));
   boardMesh.position.set(0.1, 1.68, FZ + 0.065);
   scene.add(boardMesh);
+  // 낙서할 때 카메라가 서는 자리: 칠판 정면에서 칠판이 화면 가로를 거의 채우도록 (aspect: 화면 가로/세로, fov: 세로 시야각)
+  const boardView = (aspect, fov) => {
+    const half = Math.tan((fov * Math.PI) / 360) * aspect;
+    const d = clamp(2.15 / (0.94 * half), 2.4, 9);
+    return { pos: { x: 0.1, y: 1.68, z: FZ + 0.065 + d }, look: { x: 0.1, y: 1.68, z: FZ + 0.065 } };
+  };
   box(4.3, 0.05, 0.1, '#b5bbc2', 0.1, 0.96, FZ + 0.1);
   bakedMesh([
     { g: bg(0.11, 0.022, 0.022), p: [-1.4, 1.0, 0.0], c: '#2f5fd0' },
@@ -884,6 +876,7 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null }) {
       speed: teacher ? rand(0.85, 1.0) : rand(1.05, 1.5), radius: teacher ? 0.34 : 0.3,
       state: 'idle', t: 0, dur: rand(0.5, 3), path: [], seat: null, face: null, partner: null, doing: 'idle',
       phase: rand(0, 6), stuck: 0, lastX: g.position.x, lastZ: g.position.z, wave: 0, speed01: 0,
+      mis: null, aux: null, cool: 0, cheer: 0, warn: null, // 말썽 부리는 중 / 말썽에 얽힘(놀림받는 친구·타이르는 선생님) / 다시 말썽 부리기까지 쉬는 때 / 기뻐서 손 흔드는 시간
     };
   });
   // 처음에는 친구 몇 명이 자리에 앉아 있다
@@ -990,9 +983,17 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null }) {
     let waveOn = false;
     let gesture = 0;
     let write = false;
+    let pose = '';
+    let mood = '';
 
-    // 가까이 온 아이에게 인사한다 (걷던 길은 잠깐 멈춘다)
-    if (n.state === 'sit') {
+    // 말썽 부리는 친구는 제 할 일에 바쁘고, 놀림받는 친구와 타이르는 선생님은 그 곁을 지킨다
+    if (n.mis && !n.mis.over) {
+      const r = misStep(n, t, dt, pp, dP);
+      ({ moving, pose, mood, gesture } = r);
+    } else if (n.aux) {
+      const r = auxStep(n, t, dt);
+      ({ moving, pose, mood, gesture } = r);
+    } else if (n.state === 'sit') { // 가까이 온 아이에게 인사한다 (걷던 길은 잠깐 멈춘다)
       if (dP < 2.6) { waveOn = true; u.head.rotation.y = damp(u.head.rotation.y, clamp(angleDelta(g.rotation.y, Math.atan2(pp.x - p.x, pp.z - p.z)), -1, 1), 5, dt); }
       else u.head.rotation.y = damp(u.head.rotation.y, 0, 4, dt);
       n.t += dt;
@@ -1064,23 +1065,36 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null }) {
       sep(n, hs, dt);
     }
 
-    // 몸짓
-    n.speed01 = damp(n.speed01, moving ? 1 : 0, 8, dt);
-    const sw = Math.sin(t * (6 + n.speed * 2) + n.phase) * 0.7 * n.speed01;
+    // 기뻐서 손을 흔든다 (타이름을 듣고 난 뒤)
+    if (n.cheer > 0) { n.cheer -= dt; waveOn = true; }
+
+    // 몸짓: 뛰기(run)는 팔다리를 크게 흔들며 앞으로 숙이고, 발 구르기(stomp)는 제자리에서, 장난(poke)은 팔을 쭉 뻗고, 팔짱(cross)은 팔을 접는다
+    const running = pose === 'run';
+    const stomp = pose === 'stomp';
+    n.speed01 = damp(n.speed01, moving ? 1 : stomp ? 0.55 : 0, 8, dt);
+    const freq = stomp ? 9 : 6 + n.speed * 2;
+    const sw = Math.sin(t * freq + n.phase) * (running ? 1.05 : stomp ? 0.5 : 0.7) * n.speed01;
     if (!u.sit) {
       kit.limbs(g, sw, n.speed01);
       if (gesture) u.armL.rotation.x += Math.sin(t * 3 + n.phase) * 0.3;
-      u.body.position.y = u.baseY + Math.abs(Math.sin(t * (6 + n.speed * 2) + n.phase)) * 0.035 * n.speed01 + Math.sin(t * 1.6 + n.phase) * 0.01;
+      if (pose === 'cross') { u.armL.rotation.x = -0.85; u.elbowL.rotation.x = -1.7; }
+      u.body.position.y = u.baseY + Math.abs(Math.sin(t * freq + n.phase)) * (running ? 0.075 : 0.035) * n.speed01 + Math.sin(t * 1.6 + n.phase) * 0.01;
     } else u.body.position.y = u.baseY + Math.sin(t * 1.6 + n.phase) * 0.012;
+    u.body.rotation.x = damp(u.body.rotation.x, running ? 0.2 : 0, 8, dt);
+    u.body.rotation.z = stomp ? Math.sin(t * 17) * 0.05 : damp(u.body.rotation.z, 0, 8, dt);
+    u.head.rotation.x = damp(u.head.rotation.x, pose === 'listen' ? 0.34 : 0, 6, dt); // 타이름을 듣는 동안 고개를 숙인다
     let armRz = REST_Z;
     let armRx = u.sit ? -0.7 : sw * 0.9;
     let elbowR = u.sit ? -0.95 : u.elbowR.rotation.x;
     if (waveOn) { armRz = 2.4 + Math.sin(t * 9) * 0.35; elbowR = -0.5 + Math.sin(t * 9) * 0.25; }
+    else if (pose === 'poke') { armRz = 0.25; armRx = -1.35 + Math.sin(t * 12) * 0.4; elbowR = -0.3; }
+    else if (pose === 'cross') { armRx = -0.85; elbowR = -1.7; }
+    else if (stomp) { armRz = 0.55; armRx = -0.25; elbowR = -1.2; }
     else if (write) { armRz = 2.1 + Math.sin(t * 4) * 0.12; armRx = 0.3; elbowR = -0.4; } else if (gesture) { armRx = -0.9 + Math.sin(t * 3.4 + n.phase) * 0.35; elbowR = -0.9; }
     u.armR.rotation.z = damp(u.armR.rotation.z, armRz, 9, dt);
     u.armR.rotation.x = damp(u.armR.rotation.x, armRx, 9, dt);
     u.elbowR.rotation.x = damp(u.elbowR.rotation.x, elbowR, 9, dt);
-    kit.face(g, t, waveOn || gesture === 1);
+    kit.face(g, t, mood === 'angry' ? 'angry' : (mood === 'happy' || waveOn || gesture === 1));
     n.wave = waveOn ? 1 : 0;
   }
 
@@ -1091,6 +1105,287 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null }) {
     n.t = 0;
     n.dur = n.doing === 'write' ? rand(7, 12) : n.doing === 'gaze' ? rand(5, 10) : n.doing === 'look' ? rand(2, 4) : rand(2, 6);
   }
+
+  // ── 말썽 친구: 약속(rules.js)을 어기는 친구를 찾아 다정하게 타이르면 별을 받는다 ──
+  //  n.mis: 말썽 부리는 친구 { type, rule, over, caught, victim, teacher, phase … }
+  //  n.aux: 말썽에 얽힌 친구 { role: 'victim'(놀림받는 친구) | 'teacher'(타이르러 온 선생님), with: 말썽꾼 }
+  //  마음 쉼터가 시작되면 world.js 가 mis.setOn(true) 로 켜고, 걸어 다닌 시간(elapsed)을 알려 주며 일정에 따라 하나씩 나타난다.
+  const RUN_SPEED = 3.2;
+  const MIS_MAX = 5; // 한 번의 쉼터에서 나타나는 말썽 수
+  const MIS_LIFE = 80; // 아무도 타이르지 않으면 이만큼(걸어 다닌 초) 뒤에 제풀에 그친다
+  const hooks = { say: null }; // world.js 가 말풍선을 띄우려고 건다: (친구, 글) => void
+  const speak = (n, text) => { if (hooks.say) hooks.say(n, text); };
+  const sched = { on: false, at: 12, spawned: 0, fixed: 0, missed: 0, fails: 0, order: [] };
+  const nowSec = () => performance.now() / 1000;
+  const gdist = (a, b) => Math.hypot(a.group.position.x - b.group.position.x, a.group.position.z - b.group.position.z);
+
+  function stepAlong(n, dt, speed) { // 길을 따라 한 걸음. 움직였으면 true
+    const p = n.group.position;
+    const tgt = n.path[0];
+    if (!tgt) return false;
+    const dx = tgt.x - p.x;
+    const dz = tgt.z - p.z;
+    const d = Math.hypot(dx, dz);
+    if (d < 0.2) { n.path.shift(); return false; }
+    const step = Math.min(d, speed * dt);
+    p.x += (dx / d) * step;
+    p.z += (dz / d) * step;
+    faceTo(n.group, tgt.x, tgt.z, 10, dt);
+    return true;
+  }
+  function repath(n, x, z) {
+    n.path = nav.path(n.group.position, { x, z });
+    n.stuck = 0; n.lastX = n.group.position.x; n.lastZ = n.group.position.z;
+  }
+  function unstick(n, dt, onStuck) { // 한참 못 움직이면 알려 준다
+    n.stuck += dt;
+    if (n.stuck > 1.3) {
+      const p = n.group.position;
+      if (Math.hypot(p.x - n.lastX, p.z - n.lastZ) < 0.25) onStuck();
+      n.stuck = 0; n.lastX = p.x; n.lastZ = p.z;
+    }
+  }
+  // 하던 일(앉으러 가기, 수다, 앉아 있기)을 그만두고 선 채로 시작한다
+  function freeUp(n) {
+    if (n.pendingSeat) { n.pendingSeat.taken = false; n.pendingSeat = null; }
+    if (n.partner) { if (n.partner.partner === n) n.partner.partner = null; n.partner = null; }
+    if (n.state === 'sit') standUp(n);
+    n.path = []; n.state = 'idle'; n.t = 0; n.dur = 1; n.doing = 'idle'; n.face = null;
+  }
+  function calm(n, sec = 1.5) { n.aux = null; n.state = 'idle'; n.t = 0; n.dur = sec + rand(0, 1); n.doing = 'idle'; n.path = []; n.face = null; }
+
+  // 머리 위의 빨간 느낌표 배지와 발밑의 빨간 동그라미: 멀리서도 눈에 띈다
+  const warnTexes = {};
+  const warnTex = (icon) => {
+    if (!warnTexes[icon]) {
+      warnTexes[icon] = canvasTex(128, 128, (g) => {
+        g.fillStyle = '#ff5a4f';
+        g.beginPath(); g.arc(62, 66, 50, 0, 7); g.fill();
+        g.lineWidth = 8; g.strokeStyle = '#ffffff'; g.stroke();
+        g.font = '60px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = '#ffffff';
+        g.fillText(icon, 62, 70);
+        g.fillStyle = '#ffd23f';
+        g.beginPath(); g.arc(106, 24, 20, 0, 7); g.fill();
+        g.lineWidth = 4; g.strokeStyle = '#2b2d42'; g.stroke();
+        g.fillStyle = '#2b2d42'; g.font = '700 28px sans-serif';
+        g.fillText('!', 106, 27);
+      });
+    }
+    return warnTexes[icon];
+  };
+  function addWarn(n, rule) {
+    const sprite = new T.Sprite(new T.SpriteMaterial({ map: warnTex(rule.icon), transparent: true, depthTest: false, depthWrite: false }));
+    sprite.scale.set(0.62, 0.62, 1);
+    sprite.position.set(0, 2.78, 0);
+    sprite.renderOrder = 20;
+    const ring = new T.Mesh(
+      new T.RingGeometry(0.62, 0.82, 40),
+      new T.MeshBasicMaterial({ color: 0xff5a4f, transparent: true, opacity: 0.6, side: T.DoubleSide, depthWrite: false })
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.06;
+    n.group.add(sprite, ring);
+    n.warn = { sprite, ring };
+  }
+  function dropWarn(n) {
+    if (!n.warn) return;
+    n.group.remove(n.warn.sprite, n.warn.ring);
+    n.warn.ring.geometry.dispose();
+    n.warn.ring.material.dispose();
+    n.warn.sprite.material.dispose(); // 그림(map)은 모양마다 한 번 만들어 돌려 쓰니 치우지 않는다
+    n.warn = null;
+  }
+
+  function runTo(n, pp) { // 뛰는 친구는 아이 가까이를 이리저리 뛰어서 쫓아갈 만하다
+    const pool = [...NAV.free, ...NAV.aisle];
+    const ring = pool.filter(([x, z]) => { const d = Math.hypot(x - pp.x, z - pp.z); return d > 2.2 && d < 6.5; });
+    const [x, z] = pick(ring.length ? ring : pool);
+    repath(n, x, z);
+  }
+
+  function misStep(n, t, dt, pp) {
+    const m = n.mis;
+    const g = n.group;
+    const p = g.position;
+    const u = g.userData;
+    const r = { moving: false, pose: '', mood: '', gesture: 0 };
+    u.head.rotation.y = damp(u.head.rotation.y, 0, 4, dt);
+    if (m.caught) { // 누가 말을 걸어 주고 있다: 서서 듣는다
+      faceTo(g, pp.x, pp.z, 6, dt);
+      r.pose = 'listen';
+      return r;
+    }
+    const lines = () => { if (t > m.sayAt) { speak(n, pick(m.rule.lines)); m.sayAt = t + rand(4.5, 7); } };
+    if (m.type === 'run') {
+      r.mood = 'happy';
+      if (m.rest > 0) {
+        m.rest -= dt;
+        if (m.rest <= 0) runTo(n, pp);
+      } else if (!n.path.length) runTo(n, pp);
+      else {
+        r.moving = stepAlong(n, dt, RUN_SPEED);
+        r.pose = 'run';
+        if (!n.path.length) m.rest = rand(0.9, 1.7);
+        unstick(n, dt, () => { n.path = []; m.rest = 0.2; });
+      }
+      lines();
+    } else if (m.type === 'bad') {
+      r.mood = 'angry';
+      r.pose = 'stomp';
+      u.head.rotation.y = damp(u.head.rotation.y, Math.sin(t * 5 + n.phase) * 0.4, 6, dt);
+      lines();
+    } else if (m.type === 'tease') {
+      const v = m.victim;
+      if (!v || !v.aux || v.aux.with !== n) { endMis(n, 'missed'); return r; }
+      r.mood = 'happy';
+      faceTo(g, v.group.position.x, v.group.position.z, 8, dt);
+      if (m.phase === 'go') {
+        r.moving = stepAlong(n, dt, 2.1);
+        if (!n.path.length && gdist(n, v) > 1.25) repath(n, m.spot.x, m.spot.z);
+        if (gdist(n, v) < 1.2) { m.phase = 'poke'; n.path = []; }
+        unstick(n, dt, () => { m.phase = 'poke'; n.path = []; });
+      } else {
+        r.pose = 'poke';
+        lines();
+        if (t > m.vSayAt) { speak(v, pick(m.rule.victimLines)); m.vSayAt = t + rand(6, 9); }
+      }
+    } else if (m.type === 'ignore') {
+      const tc = m.teacher;
+      if (!tc || !tc.aux || tc.aux.with !== n) { endMis(n, 'missed'); return r; }
+      if (m.phase === 'go') {
+        r.moving = stepAlong(n, dt, 1.3);
+        if (!n.path.length) m.phase = 'stand';
+        unstick(n, dt, () => { m.phase = 'stand'; n.path = []; });
+      } else { // 선생님을 등지고 팔짱을 낀 채 고개를 젓는다
+        r.pose = 'cross';
+        const away = Math.atan2(p.x - tc.group.position.x, p.z - tc.group.position.z);
+        g.rotation.y += angleDelta(g.rotation.y, away) * (1 - Math.exp(-4 * dt));
+        u.head.rotation.y = damp(u.head.rotation.y, Math.sin(t * 2.2 + n.phase) * 0.5, 5, dt);
+        lines();
+      }
+    }
+    return r;
+  }
+
+  function auxStep(n, t, dt) {
+    const a = n.aux;
+    const o = a.with;
+    const g = n.group;
+    const u = g.userData;
+    const r = { moving: false, pose: '', mood: '', gesture: 0 };
+    if (!o.mis || o.mis.over) { calm(n); return r; }
+    u.head.rotation.y = damp(u.head.rotation.y, 0, 4, dt);
+    if (a.role === 'victim') { // 놀림받는 친구는 그 자리에서 싫은 표정으로 상대를 본다
+      faceTo(g, o.group.position.x, o.group.position.z, 5, dt);
+      r.mood = 'angry';
+      return r;
+    }
+    if (a.phase === 'go') { // 선생님이 말썽 친구에게 다가간다
+      r.moving = stepAlong(n, dt, 1.6);
+      if (!n.path.length) { if (Math.hypot(g.position.x - a.spot.x, g.position.z - a.spot.z) < 0.6) a.phase = 'talk'; else repath(n, a.spot.x, a.spot.z); }
+      unstick(n, dt, () => { a.phase = 'talk'; n.path = []; });
+    } else {
+      faceTo(g, o.group.position.x, o.group.position.z, 5, dt);
+      r.gesture = 1;
+      if (t > a.sayAt) { speak(n, pick(o.mis.rule.teacherLines)); a.sayAt = t + rand(5.5, 8); }
+    }
+    return r;
+  }
+
+  function endMis(n, how) {
+    const m = n.mis;
+    if (!m || m.over) return;
+    m.over = true;
+    dropWarn(n);
+    n.speed = m.speed0;
+    n.cool = nowSec() + 150;
+    for (const o of [m.victim, m.teacher]) if (o) calm(o);
+    n.mis = null;
+    calm(n, how === 'fixed' ? 2 : 0.8);
+    if (how === 'missed') sched.missed += 1;
+  }
+
+  // 말썽 시작: 앉아 있거나 이야기하던 친구를 일으켜 세워서 시작한다. 시작할 수 없으면 false
+  function startMis(n, type, elapsed) {
+    const rule = ruleOf(type);
+    const m = { type, rule, until: elapsed + MIS_LIFE, over: false, caught: false, sayAt: 0, vSayAt: 0, rest: 0, phase: 'go', victim: null, teacher: null, speed0: n.speed, spot: null };
+    if (type === 'tease') {
+      const v = crowd.filter((c) => c !== n && c.role === 'friend' && !c.mis && !c.aux && c.state !== 'sit' && c.state !== 'greet').sort((a, b) => gdist(a, n) - gdist(b, n))[0];
+      if (!v) return false;
+      freeUp(v);
+      v.aux = { role: 'victim', with: n };
+      m.victim = v;
+      const dx = n.group.position.x - v.group.position.x;
+      const dz = n.group.position.z - v.group.position.z;
+      const d = Math.hypot(dx, dz) || 1;
+      m.spot = nav.snap(v.group.position.x + (dx / d) * 0.95, v.group.position.z + (dz / d) * 0.95);
+    }
+    if (type === 'ignore') {
+      const tc = crowd.find((c) => c.role === 'teacher' && !c.mis && !c.aux);
+      if (!tc) return false;
+      freeUp(tc);
+      const stand = nav.snap(...pick(NAV.free));
+      const near = nav.snap(stand.x, stand.z + 1.3);
+      tc.aux = { role: 'teacher', with: n, phase: 'go', spot: near, sayAt: 0 };
+      repath(tc, near.x, near.z);
+      m.teacher = tc;
+      m.stand = stand;
+    }
+    freeUp(n);
+    n.mis = m;
+    if (type === 'run') n.speed = RUN_SPEED;
+    if (type === 'ignore') repath(n, m.stand.x, m.stand.z);
+    if (type === 'tease') repath(n, m.spot.x, m.spot.z);
+    addWarn(n, rule);
+    return true;
+  }
+
+  function spawnOne(elapsed, pPos) {
+    const now = nowSec();
+    const at = sched.spawned % sched.order.length;
+    const types = sched.order.slice(at).concat(sched.order.slice(0, at));
+    // 아이에게서 멀리 있는 친구부터 (찾는 재미). 마땅한 친구가 없으면 조금씩 가까운 친구도 고른다 (타이르는 창이 바로 열리지 않을 만큼은 떨어져 있게)
+    const minD = Math.max(2.7, 3.4 - sched.fails * 0.35);
+    const cands = crowd.filter((c) => c.role === 'friend' && !c.mis && !c.aux && now >= c.cool && Math.hypot(c.group.position.x - pPos.x, c.group.position.z - pPos.z) > minD).sort(() => Math.random() - 0.5);
+    for (const type of types) {
+      for (const n of cands) if (startMis(n, type, elapsed)) return true;
+    }
+    return false;
+  }
+
+  const mis = {
+    setOn(on) {
+      sched.on = on;
+      if (on && !sched.order.length) sched.order = RULES.map((r) => r.id).sort(() => Math.random() - 0.5).concat([pick(RULES).id]);
+    },
+    // elapsed: 쉼터에서 걸어 다닌 초 (타이르거나 낙서하는 동안은 흐르지 않는다), pPos: 아이의 위치
+    update(elapsed, pPos) {
+      if (!sched.on) return;
+      for (const n of crowd) if (n.mis && !n.mis.over && elapsed > n.mis.until) endMis(n, 'missed');
+      if (sched.spawned >= MIS_MAX || elapsed < sched.at) return;
+      if (crowd.filter((n) => n.mis && !n.mis.over).length >= 2) { sched.at = elapsed + 5; return; }
+      if (spawnOne(elapsed, pPos)) { sched.spawned += 1; sched.fails = 0; sched.at = elapsed + rand(34, 50); } else { sched.fails += 1; sched.at = elapsed + 6; }
+    },
+    active: () => crowd.filter((n) => n.mis && !n.mis.over),
+    hold(n, on) { if (n.mis && !n.mis.over) n.mis.caught = on; },
+    // 타이르기에 성공: 친구가 사과하고 제자리로 돌아간다. 돌려주는 값은 그 약속
+    fix(n) {
+      const m = n.mis;
+      if (!m || m.over) return null;
+      const rule = m.rule;
+      const type = m.type;
+      endMis(n, 'fixed');
+      sched.fixed += 1;
+      speak(n, rule.apology);
+      n.cheer = 2.4;
+      if (type === 'ignore' || type === 'run') { // 선생님 말씀을 들으러 자리에 앉는다
+        const seat = seats.find((s) => s.kind === 'chair' && !s.taken);
+        if (seat) { seat.taken = true; n.pendingSeat = seat; walkTo(n, seat.approach, 'sit', null); }
+      }
+      return rule;
+    },
+    stats: sched,
+  };
 
   // ── 교실 밖 공간: 복도, 복도 2, 화장실, 2층 계단 (별로 연 것만) ──
   const view = { unlocked: new Set(wInfo.unlocked), stars: wInfo.stars, catalog: wInfo.catalog };
@@ -1160,7 +1455,14 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null }) {
     icon.scale.set(0.9, 0.9, 1);
     icon.position.set(s.x, 2.3, s.z);
     scene.add(icon);
-    markers[id] = { ring, icon, base: 2.3 };
+    // 멀리서도 보이는 빛기둥: 아직 못 받은 별 자리만 환하게 서 있다
+    const pillar = new T.Mesh(
+      new T.CylinderGeometry(0.45, 0.45, 3.1, 20, 1, true),
+      new T.MeshBasicMaterial({ color: 0xfff1a8, transparent: true, opacity: 0.2, side: T.DoubleSide, depthWrite: false, blending: T.AdditiveBlending, fog: false })
+    );
+    pillar.position.set(s.x, 1.55, s.z);
+    scene.add(pillar);
+    markers[id] = { ring, icon, pillar, base: 2.3 };
   }
   const doneStarTex = iconTex('⭐');
 
@@ -1177,6 +1479,7 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null }) {
       if (!peer) {
         const d = peerDesc(p.kind);
         const g = kit.make(d.look, { name: d.tag, scale: d.scale, tagBg: d.tagBg, role: d.role });
+        g.visible = !hiding;
         g.position.set(p.x, 0, p.z);
         g.rotation.y = p.ry;
         scene.add(g);
@@ -1210,8 +1513,19 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null }) {
   };
   const humans = [];
 
+  // 칠판에 낙서하는 동안은 사람들이 카메라 앞을 가리지 않게 모두 숨긴다
+  let hiding = false;
+  const setDrawMode = (on) => {
+    hiding = on;
+    player.visible = !on;
+    bunny.group.visible = !on;
+    for (const n of crowd) n.group.visible = !on;
+    for (const p of peers.values()) p.group.visible = !on;
+  };
+
   return {
     scene, camera, player, colliders, stops, bunny, drawBoard, npcs: crowd, peers, syncPeers, grade, nav, halls, view,
+    board, boardMesh, boardView, setDrawMode, mis, hooks,
     animatePlayer(speed01, t) { swing(player, speed01, t); },
     animate(t, dt, pos, st) {
       humans.length = 0;
@@ -1230,7 +1544,15 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null }) {
         humans.push(g.position);
       }
       halls.update(t, dt);
-      for (const n of crowd) brain(n, t, dt, humans);
+      if (!st.drawing) for (const n of crowd) brain(n, t, dt, humans); // 칠판에 낙서하는 동안은 교실이 멈춰 있다
+      for (const n of crowd) {
+        if (!n.warn) continue; // eslint-disable-line no-continue
+        n.warn.sprite.position.y = 2.78 + Math.sin(t * 5 + n.phase) * 0.08;
+        const k = 1 + Math.sin(t * 5 + n.phase) * 0.08;
+        n.warn.sprite.scale.set(0.62 * k, 0.62 * k, 1);
+        n.warn.ring.material.opacity = 0.5 + Math.sin(t * 4 + n.phase) * 0.22;
+        n.warn.sprite.material.opacity = clamp((camera.position.distanceTo(n.group.position) - 1.6) / 1.8, 0, 1); // 카메라에 너무 가까우면 가린다
+      }
       // 토끼: 러그 근처를 사뿐사뿐
       const bp = bunny.group.position;
       bunny.wait -= dt;
@@ -1271,6 +1593,12 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null }) {
         m.ring.scale.set(sc, sc, 1);
         m.icon.position.y = m.base + Math.sin(t * 1.8) * 0.1;
         m.icon.material.opacity = clamp((camera.position.distanceTo(m.icon.position) - 1.2) / 1.6, 0, 1);
+        m.ring.visible = !hiding; // 칠판에 낙서하는 동안은 별 자리 표시가 칠판을 가리지 않게 숨긴다
+        m.icon.visible = !hiding;
+        m.pillar.visible = !doneIt && !hiding;
+        // 카메라가 기둥 안이나 바로 곁에 있으면 화면이 하얘지니 흐리게 한다
+        const near = Math.hypot(camera.position.x - stops[id].x, camera.position.z - stops[id].z);
+        m.pillar.material.opacity = (0.16 + Math.sin(t * 2.2 + 1) * 0.07) * clamp((near - 1.2) / 2.4, 0, 1);
         if (doneIt && m.icon.material.map !== doneStarTex) { m.icon.material.map = doneStarTex; m.icon.material.needsUpdate = true; }
       }
     },

@@ -188,13 +188,20 @@ function drawFace(g, W, H, { iris, irisLight, irisDark, brow, lip, mood }) {
       g.ellipse(x, ey, rx, ry, 0, Math.PI * 0.16, Math.PI * 0.84);
       g.stroke();
     }
-    // 눈썹
+    // 눈썹 (화나면 안쪽이 아래로 내려온다)
     g.strokeStyle = brow;
-    g.lineWidth = 8;
     g.beginPath();
-    const by = ey - (mood === 'happy' ? 88 : 80);
-    g.moveTo(x - 38, by + 7);
-    g.quadraticCurveTo(x - 2, by - 12, x + 38, by + 5);
+    if (mood === 'angry') {
+      g.lineWidth = 12;
+      const ay = ey - 68;
+      g.moveTo(x + outer * 42, ay - 8);
+      g.lineTo(x - outer * 40, ay + 26);
+    } else {
+      g.lineWidth = 8;
+      const by = ey - (mood === 'happy' ? 88 : 80);
+      g.moveTo(x - 38, by + 7);
+      g.quadraticCurveTo(x - 2, by - 12, x + 38, by + 5);
+    }
     g.stroke();
   }
 
@@ -229,6 +236,13 @@ function drawFace(g, W, H, { iris, irisLight, irisDark, brow, lip, mood }) {
     g.quadraticCurveTo(cx, my + 4, cx + 26, my - 4);
     g.quadraticCurveTo(cx, my + 12, cx - 26, my - 4);
     g.fill();
+  } else if (mood === 'angry') {
+    g.strokeStyle = lip;
+    g.lineWidth = 8;
+    g.beginPath();
+    g.moveTo(cx - 26, my + 14);
+    g.quadraticCurveTo(cx, my - 14, cx + 26, my + 14);
+    g.stroke();
   } else {
     g.strokeStyle = lip;
     g.lineWidth = 7;
@@ -714,10 +728,10 @@ export function characterKit(T, tb) {
     u.elbowR.rotation.x = -0.18 - Math.abs(sw) * 0.4;
   }
 
-  // 표정: 눈을 깜빡이고, 신나면(손 흔들거나 이야기할 때) 활짝 웃는다
+  // 표정: 눈을 깜빡이고, 신나면(손 흔들거나 이야기할 때) 활짝 웃고, 화가 나면(happy 자리에 'angry') 찡그린다
   function face(ch, t, happy) {
     const u = ch.userData;
-    let mood = happy ? 'happy' : 'open';
+    let mood = happy === 'angry' ? 'angry' : happy ? 'happy' : 'open';
     if (!happy) {
       if (t > u.nextBlink) { u.blinkUntil = t + 0.13; u.nextBlink = t + rand(2.2, 5.5); }
       if (t < u.blinkUntil) mood = 'blink';
