@@ -6,7 +6,7 @@ import {
   ROOM, START, THEMES, PLAYER_LOOK, PARENTS, PARENT_SCALE, TEACHER_SCALE, KID_SCALE, FRIEND_SCALE,
   clamp, damp, angleDelta, rand, pick, givenName, resolve, makeNav, floorY,
 } from './world-shared.js';
-import { toolbox, characterKit, bake, disposeCharacter } from './character.js';
+import { toolbox, characterKit, bake, disposeCharacter, roomEnvironment } from './character.js';
 import { buildHalls } from './schoolhall.js';
 import { createBoard, BOARD_W, BOARD_H } from './board.js';
 import { RULES, ruleOf } from './rules.js';
@@ -27,7 +27,8 @@ const FONT = (px) => `700 ${px}px Jua, "Malgun Gothic", sans-serif`;
 // 장면: 교실, 가구, 친구와 선생님, 토끼, 빛과 먼지
 //  world: { catalog, unlocked, stars } 마음 쉼터 넓히기에서 열린 공간 (없으면 교실만)
 //  boardImage: 아이가 칠판에 남긴 낙서(PNG data URL, 없으면 빈 칠판)
-export function buildScene(T, { user, emoji, npcs, room, self, world = null, boardImage = '' }) {
+//  renderer: 빛 환경(IBL)을 한 번 구울 때 쓴다 (없으면 반구 빛만으로 밝힌다)
+export function buildScene(T, { user, emoji, npcs, room, self, world = null, boardImage = '', renderer = null }) {
   const wInfo = world || { catalog: [], unlocked: [], stars: 0 };
   const scene = new T.Scene();
   scene.background = new T.Color(0xd6ecff);
@@ -35,7 +36,7 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
   const camera = new T.PerspectiveCamera(52, 1.6, 0.1, 220);
   const colliders = [];
   const tb = toolbox(T);
-  const { M, canvasTex, track } = tb;
+  const { M, L, canvasTex, track } = tb;
   const kit = characterKit(T, tb);
   const theme = THEMES[room?.theme] || THEMES.default;
   const grade = room?.grade || 0;
@@ -53,7 +54,7 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
   const cyl = (rt, rb, h, seg = 10) => new T.CylinderGeometry(rt, rb, h, seg);
   // 그림 한 장을 벽·가구 앞면에 붙인다 (lit: 빛을 받는 재질 / 아니면 밝은 그대로)
   const panel = (tex, w, h, x, y, z, ry = 0, lit = false, opts = {}) => {
-    const mat = track(lit ? new T.MeshLambertMaterial({ map: tex, ...opts }) : new T.MeshBasicMaterial({ map: tex, ...opts }));
+    const mat = lit ? L({ map: tex, ...opts }) : track(new T.MeshBasicMaterial({ map: tex, ...opts }));
     const m = new T.Mesh(new T.PlaneGeometry(w, h), mat);
     m.position.set(x, y, z);
     m.rotation.y = ry;
@@ -129,32 +130,78 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
     return m;
   };
 
-  // ── 빛: 하얀 형광등 + 창으로 들어오는 햇빛 ──
-  scene.add(new T.HemisphereLight(0xffffff, 0xd9cdb8, 2.3));
-  const sun = new T.DirectionalLight(0xfff4dc, 1.7);
-  sun.position.set(-12, 9, 3);
-  scene.add(sun);
-  const fill = new T.DirectionalLight(0xfff8ee, 0.8); // 반대쪽 벽과 복도 벽도 환하게
-  fill.position.set(12, 7, -3);
-  scene.add(fill);
-  for (const [x, z] of [[-3.5, -2.5], [2.2, -3], [3.6, 2.4], [-3, 3.6], [1, 0.3]]) {
-    const l = new T.PointLight(0xfff3e0, 8, 12, 2);
-    l.position.set(x, 3.0, z);
-    scene.add(l);
+  // ── 빛: 교실 빛 환경(천장 형광등·창의 하늘빛이 고루 밝힌다) + 창으로 들어오는 오후 햇빛(가구 그림자) ──
+  let envRT = null;
+  if (renderer) {
+    try {
+      envRT = roomEnvironment(T, renderer, { wall: theme.wall });
+      scene.environment = envRT.texture;
+      scene.environmentIntensity = 0.6;
+    } catch (err) {
+      console.warn('[world] 빛 환경을 만들지 못했어요', err);
+    }
   }
+  const hemi = new T.HemisphereLight(0xfffaf0, 0xd9cdb8, envRT ? 0.25 : 2.3);
+  scene.add(hemi);
+  const sun = new T.DirectionalLight(0xfff0d4, envRT ? 2.5 : 1.7);
+  sun.position.set(-8.5, 10.5, 3.5);
+  sun.target.position.set(0, 0, 0);
+  scene.add(sun, sun.target);
+  // 반대쪽(복도 쪽) 위에서 오는 은은한 빛: 창문 벽과 물건 뒷면이 칙칙해지지 않게 (그림자 없음)
+  const fill = new T.DirectionalLight(0xf4f6ff, envRT ? 0.7 : 0.8);
+  fill.position.set(7, 8, -8);
+  scene.add(fill);
+  // 가구는 움직이지 않으니 그림자 지도는 처음 한 번만 그린다 (움직이는 문·사람은 그림자를 드리우지 않는다)
+  sun.castShadow = true;
+  sun.shadow.autoUpdate = false;
+  sun.shadow.needsUpdate = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.radius = 3.2;
+  sun.shadow.bias = -0.0006;
+  sun.shadow.normalBias = 0.025;
+  sun.shadow.intensity = 0.82;
+  {
+    // 그림자 사진기가 교실(가구 높이까지)을 꼭 맞게 담도록 크기를 잡는다
+    const cam = sun.shadow.camera;
+    cam.position.copy(sun.position);
+    cam.lookAt(sun.target.position);
+    cam.updateMatrixWorld(true);
+    const inv = cam.matrixWorldInverse;
+    const v = new T.Vector3();
+    let [x0, x1, y0, y1, z0, z1] = [Infinity, -Infinity, Infinity, -Infinity, Infinity, -Infinity];
+    for (const x of [-ROOM.x - 0.4, ROOM.x + 0.4]) for (const y of [0, 2.6]) for (const z of [-ROOM.z - 0.4, ROOM.z + 0.4]) {
+      v.set(x, y, z).applyMatrix4(inv);
+      x0 = Math.min(x0, v.x); x1 = Math.max(x1, v.x); y0 = Math.min(y0, v.y); y1 = Math.max(y1, v.y); z0 = Math.min(z0, v.z); z1 = Math.max(z1, v.z);
+    }
+    Object.assign(cam, { left: x0, right: x1, bottom: y0, top: y1, near: Math.max(0.1, -z1 - 1), far: -z0 + 1 });
+    cam.updateProjectionMatrix();
+  }
+  // 바닥 그늘(AO): 가구 밑과 벽 가장자리. 가구를 놓을 때마다 적어 두었다가 마지막에 바닥 그림으로 굽는다
+  const aoSpots = [];
+  const ao = (x, z, w, d, k = 0.5, round = false) => aoSpots.push({ x, z, w, d, k, round });
+  // 햇빛 그림자를 드리우는 것은 가구뿐이다 (cast 로 표시). 벽·천장은 햇빛을 막지 않아 창가가 어두워지지 않는다.
+  const cast = (o) => { o.traverse((c) => { c.userData.cast = true; }); return o; };
 
   // ── 바닥(연한 타일)·천장(흰 천장판과 형광등) ──
-  const floorTex = canvasTex(256, 256, (g, w, h) => {
-    const tones = ['#ece8df', '#e6e2d8', '#eae6dc', '#e8e4da'];
-    for (let i = 0; i < 2; i += 1) for (let j = 0; j < 2; j += 1) { g.fillStyle = tones[i * 2 + j]; g.fillRect(i * 128, j * 128, 128, 128); }
-    for (let k = 0; k < 1100; k += 1) {
-      g.fillStyle = k % 2 ? 'rgba(150,140,125,.13)' : 'rgba(255,255,255,.4)';
-      g.fillRect(Math.random() * w, Math.random() * h, 2, 2);
+  const floorTex = canvasTex(512, 512, (g, w, h) => {
+    const tones = ['#eeeae1', '#e7e3d9', '#ebe7dd', '#e9e5db'];
+    for (let i = 0; i < 2; i += 1) for (let j = 0; j < 2; j += 1) { g.fillStyle = tones[i * 2 + j]; g.fillRect(i * 256, j * 256, 256, 256); }
+    let seed = 7;
+    const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+    for (let k = 0; k < 4200; k += 1) {
+      const c = rnd();
+      g.fillStyle = c < 0.45 ? 'rgba(150,140,125,.14)' : c < 0.55 ? 'rgba(120,135,150,.12)' : 'rgba(255,255,255,.45)';
+      const s = 1 + rnd() * 2.2;
+      g.fillRect(rnd() * w, rnd() * h, s, s);
     }
-    g.fillStyle = 'rgba(165,155,140,.55)';
-    g.fillRect(0, 0, w, 2); g.fillRect(0, 0, 2, h); g.fillRect(0, 127, w, 2); g.fillRect(127, 0, 2, h);
+    // 타일 줄눈: 가운데는 어둡고 양옆은 살짝 밝게 (움푹 들어간 느낌)
+    for (const p of [0, 256]) {
+      g.fillStyle = 'rgba(160,150,135,.6)'; g.fillRect(0, p, w, 3); g.fillRect(p, 0, 3, h);
+      g.fillStyle = 'rgba(255,255,255,.55)'; g.fillRect(0, p + 3, w, 2); g.fillRect(p + 3, 0, 2, h);
+    }
   }, [(ROOM.x * 2) / 1.2, (ROOM.z * 2) / 1.2]);
-  const floor = new T.Mesh(new T.PlaneGeometry(ROOM.x * 2, ROOM.z * 2), track(new T.MeshLambertMaterial({ map: floorTex })));
+  const floorMat = L({ map: floorTex, roughness: 0.42 });
+  const floor = new T.Mesh(new T.PlaneGeometry(ROOM.x * 2, ROOM.z * 2), floorMat);
   floor.rotation.x = -Math.PI / 2;
   scene.add(floor);
   const ceilTex = canvasTex(128, 128, (g, w, h) => {
@@ -228,9 +275,18 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
     for (let y = 0; y < h; y += 8) { g.fillStyle = '#b7bec6'; g.fillRect(0, y + 5, w, 3); g.fillStyle = '#dde1e6'; g.fillRect(0, y, w, 2); }
     g.fillStyle = 'rgba(255,255,255,.7)'; g.fillRect(w / 2 - 1, 0, 2, h);
   });
+  // 창유리: 아주 옅은 유리에 교실 빛이 살짝 비친다
+  const glassMat = track(new T.MeshStandardMaterial({
+    color: 0xe4f1ff, transparent: true, opacity: 0.1, roughness: 0.04, metalness: 0, depthWrite: false, side: T.DoubleSide,
+  }));
   for (const zc of WIN) {
     panel(blindTex, 2.86, 0.78, -ROOM.x + 0.1, 2.15, zc, Math.PI / 2, true);
     box(0.07, 0.07, 2.96, '#aab2bb', -ROOM.x + 0.1, 2.55, zc);
+    const glass = new T.Mesh(new T.PlaneGeometry(2.96, 1.58), glassMat);
+    glass.position.set(-ROOM.x + 0.03, 1.75, zc);
+    glass.rotation.y = Math.PI / 2;
+    glass.renderOrder = 1;
+    scene.add(glass);
   }
   // 창 아래 수납장 (위에 우리 반 꽃 화분)
   const cabTex = canvasTex(256, 128, (g, w, h) => {
@@ -240,10 +296,11 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
     for (let i = 0; i < 2; i += 1) { g.strokeRect(6 + i * 128, 8, 116, h - 16); g.fillStyle = '#7a6a5a'; g.fillRect(i * 128 + (i ? 14 : 100), h / 2 - 12, 6, 24); }
   }, [(ROOM.z * 2 - 0.4) / 1.0, 1]);
   const sillLen = ROOM.z * 2 - 0.4;
-  box(0.45, 0.9, sillLen, '#cfae7e', -ROOM.x + 0.25, 0.45, 0);
-  box(0.5, 0.04, sillLen + 0.05, '#e9d3ab', -ROOM.x + 0.26, 0.92, 0);
+  cast(box(0.45, 0.9, sillLen, '#cfae7e', -ROOM.x + 0.25, 0.45, 0));
+  cast(box(0.5, 0.04, sillLen + 0.05, '#e9d3ab', -ROOM.x + 0.26, 0.92, 0));
   panel(cabTex, sillLen, 0.84, -ROOM.x + 0.485, 0.45, 0, Math.PI / 2, true);
   colliders.push({ x: -ROOM.x + 0.26, z: 0, hw: 0.26, hd: ROOM.z - 0.3 });
+  ao(-ROOM.x + 0.26, 0, 0.56, sillLen + 0.1, 0.6);
 
   // ── 창밖: 하늘, 운동장, 나무, 멀리 아파트, 구름 ──
   const skyTex = canvasTex(8, 256, (g, w, h) => {
@@ -266,7 +323,7 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
     g.beginPath(); g.moveTo(w / 2, 14); g.lineTo(w / 2, h - 14); g.stroke();
     g.beginPath(); g.arc(w / 2, h / 2, 36, 0, Math.PI * 2); g.stroke();
   });
-  const yard = new T.Mesh(new T.PlaneGeometry(34, 26), track(new T.MeshLambertMaterial({ map: yardTex })));
+  const yard = new T.Mesh(new T.PlaneGeometry(34, 26), L({ map: yardTex, roughness: 1 }));
   yard.rotation.x = -Math.PI / 2;
   yard.position.set(-30, -0.03, -3);
   scene.add(yard);
@@ -283,17 +340,28 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
     for (let y = 6; y < h - 6; y += 14) for (let x = 6; x < w - 6; x += 14) g.fillRect(x, y, 8, 8);
   });
   [[-96, -52, 18, 34], [-100, -30, 16, 44], [-94, -6, 18, 38], [-102, 18, 16, 48], [-96, 42, 18, 36], [-104, 64, 16, 42]].forEach(([x, z, w, h], i) => {
-    const m = new T.Mesh(new T.BoxGeometry(12, h, w), track(new T.MeshLambertMaterial({ map: aptTex, color: i % 2 ? 0xffffff : 0xf4f0ea })));
+    const m = new T.Mesh(new T.BoxGeometry(12, h, w), L({ map: aptTex, color: i % 2 ? 0xffffff : 0xf4f0ea }));
     scene.add(place(m, x, h / 2 - 1, z));
   });
-  for (let i = 0; i < 16; i += 1) {
-    const tr = new T.Group();
-    const trunk = new T.Mesh(new T.CylinderGeometry(0.18, 0.24, 1.6, 6), M(0x9a6b45));
-    trunk.position.y = 0.8;
-    const crown = new T.Mesh(new T.SphereGeometry(1.4 + Math.random() * 0.7, 10, 8), M([0x6dbb7a, 0x5aab6a, 0x82c987][i % 3]));
-    crown.position.y = 2.7;
-    tr.add(trunk, crown);
-    scene.add(place(tr, -14 - Math.random() * 12, 0, -24 + Math.random() * 48));
+  // 운동장 가의 나무들: 줄기 + 몽글몽글한 잎 덩어리 세 개 (모두 한 덩어리로 구워 한 번에 그린다)
+  {
+    const trunkG = cyl(0.17, 0.26, 1.8, 7);
+    const crownG = new T.SphereGeometry(1, 12, 9);
+    const greens = ['#6dbb7a', '#5aab6a', '#82c987', '#74b86c'];
+    const items = [];
+    for (let i = 0; i < 16; i += 1) {
+      const x = -14 - Math.random() * 12;
+      const z = -24 + Math.random() * 48;
+      const s = 0.85 + Math.random() * 0.45;
+      const c = greens[i % greens.length];
+      items.push({ g: trunkG, p: [x, 0.9 * s, z], s: [s, s, s], c: '#9a6b45' });
+      items.push({ g: crownG, p: [x, 2.75 * s, z], s: [1.45 * s, 1.3 * s, 1.45 * s], c });
+      items.push({ g: crownG, p: [x + 0.75 * s, 2.3 * s, z + 0.35 * s], s: [1.0 * s, 0.9 * s, 1.0 * s], c: greens[(i + 1) % greens.length] });
+      items.push({ g: crownG, p: [x - 0.55 * s, 3.3 * s, z - 0.3 * s], s: [0.95 * s, 0.85 * s, 0.95 * s], c: '#8fd08f' });
+    }
+    scene.add(new T.Mesh(bake(T, items), vmat));
+    crownG.dispose();
+    trunkG.dispose();
   }
   const clouds = [];
   const cloudTex = canvasTex(256, 128, (g) => {
@@ -357,7 +425,8 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
   }
   const drawBoard = (word) => board.setWord(word);
   box(4.5, 1.38, 0.06, '#d4d8dc', 0.1, 1.68, FZ + 0.03);
-  const boardMesh = new T.Mesh(new T.PlaneGeometry(4.3, 1.17), new T.MeshBasicMaterial({ map: boardTex }));
+  // 칠판 면은 색 보정(톤 매핑)을 받지 않는다: 하얀 칠판이 회색으로 바래지 않고 낙서 색이 그대로 보인다
+  const boardMesh = new T.Mesh(new T.PlaneGeometry(4.3, 1.17), new T.MeshBasicMaterial({ map: boardTex, toneMapped: false }));
   boardMesh.position.set(0.1, 1.68, FZ + 0.065);
   scene.add(boardMesh);
   // 낙서할 때 카메라가 서는 자리: 칠판 정면에서 칠판이 화면 가로를 거의 채우도록 (aspect: 화면 가로/세로, fov: 세로 시야각)
@@ -498,28 +567,31 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
       g.fillRect(i % 2 ? 18 + i * 124 : 100 + i * 124, 100, 6, 40);
     }
   });
-  box(2.4, 2.4, 0.5, '#cba67a', -5.75, 1.2, FZ + 0.27);
+  cast(box(2.4, 2.4, 0.5, '#cba67a', -5.75, 1.2, FZ + 0.27));
   panel(tallTex, 2.4, 2.4, -5.75, 1.2, FZ + 0.53, 0, true);
   solid(-5.75, FZ + 0.27, 1.2, 0.27);
+  ao(-5.75, FZ + 0.27, 2.5, 0.62, 0.6);
 
   // 선생님 책상과 의자 (앞쪽 왼쪽)
   const TD = { x: -4.9, z: -4.1 };
-  box(1.6, 0.05, 0.78, '#e4c79b', TD.x, 0.76, TD.z);
-  box(1.5, 0.7, 0.7, '#d1ae7e', TD.x, 0.35, TD.z);
+  cast(box(1.6, 0.05, 0.78, '#e4c79b', TD.x, 0.76, TD.z));
+  cast(box(1.5, 0.7, 0.7, '#d1ae7e', TD.x, 0.35, TD.z));
   box(1.0, 0.5, 0.02, '#f3efe7', TD.x, 0.42, TD.z + 0.36);
+  ao(TD.x, TD.z, 1.62, 0.84, 0.62);
+  ao(TD.x, TD.z - 0.95, 0.5, 0.5, 0.35, true);
   bakedMesh([
     { g: bg(0.42, 0.02, 0.3), p: [-0.4, 0.795, 0.0], c: '#cfd3d8' },
     { g: bg(0.42, 0.28, 0.015), p: [-0.4, 0.935, -0.14], r: [-0.25, 0, 0], c: '#2b2f38' },
     { g: bg(0.1, 0.1, 0.1), p: [0.55, 0.84, 0.1], c: '#ffffff' },
     { g: bg(0.09, 0.14, 0.09), p: [0.7, 0.87, -0.15], c: '#ff8fab' },
     { g: bg(0.24, 0.03, 0.32), p: [0.15, 0.795, 0.0], c: '#8ecae6' },
-  ], scene, TD.x, 0, TD.z);
+  ], scene, TD.x, 0, TD.z).userData.cast = true;
   const tchair = new T.Group();
   box(0.5, 0.06, 0.5, '#4d6a9e', 0, 0.48, 0, tchair);
   box(0.46, 0.5, 0.06, '#4d6a9e', 0, 0.78, -0.24, tchair);
   tchair.add(place(new T.Mesh(cyl(0.025, 0.025, 0.46), M('#8e99a4')), 0, 0.23, 0));
   box(0.5, 0.04, 0.5, '#8e99a4', 0, 0.02, 0, tchair);
-  scene.add(place(tchair, TD.x, 0, TD.z - 0.95));
+  scene.add(cast(place(tchair, TD.x, 0, TD.z - 0.95)));
   solid(TD.x, TD.z, 0.82, 0.42);
   solid(TD.x, TD.z - 0.95, 0.3, 0.3);
 
@@ -575,7 +647,7 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
   const doorLeaf = new T.Group();
   const leafBody = box(0.06, 2.1, 1.2, '#e9dcc4', ROOM.x - 0.08, 1.05, DZ, doorLeaf);
   leafBody.material = M('#e9dcc4');
-  const leafFace = new T.Mesh(new T.PlaneGeometry(1.15, 2.1), track(new T.MeshLambertMaterial({ map: doorTex })));
+  const leafFace = new T.Mesh(new T.PlaneGeometry(1.15, 2.1), L({ map: doorTex }));
   leafFace.position.set(ROOM.x - 0.113, 1.05, DZ);
   leafFace.rotation.y = -Math.PI / 2;
   doorLeaf.add(leafFace);
@@ -603,10 +675,11 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
   });
   const LKX = 2.6;
   const LKW = 7.6;
-  box(LKW, 1.5, 0.46, '#d9c7a1', LKX, 0.75, BZ - 0.24);
-  box(LKW + 0.06, 0.04, 0.5, '#eadbb9', LKX, 1.52, BZ - 0.24);
+  cast(box(LKW, 1.5, 0.46, '#d9c7a1', LKX, 0.75, BZ - 0.24));
+  cast(box(LKW + 0.06, 0.04, 0.5, '#eadbb9', LKX, 1.52, BZ - 0.24));
   panel(lockerTex, LKW, 1.46, LKX, 0.75, BZ - 0.48, Math.PI, true);
   solid(LKX, BZ - 0.24, LKW / 2, 0.24);
+  ao(LKX, BZ - 0.24, LKW + 0.1, 0.6, 0.62);
   const artTex = canvasTex(1024, 220, (g, w, h) => {
     g.fillStyle = theme.plaque; g.fillRect(0, 0, w, h);
     g.fillStyle = '#ffffff'; g.fillRect(8, 8, w - 16, h - 16);
@@ -625,11 +698,12 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
   const BKX = -4.45;
   const BKW = 3.7;
   box(BKW, 2.1, 0.06, '#cfae7e', BKX, 1.05, BZ - 0.06);
-  for (const sx of [-1, 1]) box(0.05, 2.1, 0.36, '#d9b98a', BKX + sx * (BKW / 2 - 0.02), 1.05, BZ - 0.2);
+  for (const sx of [-1, 1]) cast(box(0.05, 2.1, 0.36, '#d9b98a', BKX + sx * (BKW / 2 - 0.02), 1.05, BZ - 0.2));
   const levels = [0.08, 0.55, 1.0, 1.45, 1.9];
-  for (const y of levels) box(BKW, 0.04, 0.36, '#e3c799', BKX, y, BZ - 0.2);
+  for (const y of levels) cast(box(BKW, 0.04, 0.36, '#e3c799', BKX, y, BZ - 0.2));
+  ao(BKX, BZ - 0.2, BKW + 0.1, 0.5, 0.55);
   const BOOKN = 4 * 30;
-  const books = new T.InstancedMesh(new T.BoxGeometry(1, 1, 1), new T.MeshLambertMaterial({ color: 0xffffff }), BOOKN);
+  const books = cast(new T.InstancedMesh(new T.BoxGeometry(1, 1, 1), track(new T.MeshStandardMaterial({ color: 0xffffff, roughness: 0.75, metalness: 0 })), BOOKN));
   const dm = new T.Object3D();
   const bookColors = [0xff8fab, 0x90e0ef, 0xffd166, 0xb5e48c, 0xc7a6ff, 0xffa07a, 0x8ecae6];
   let bi = 0;
@@ -681,8 +755,9 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
     { g: bg(0.01, 0.46, 0.56), p: [-0.385, 0.97, 0], c: '#ffffff' },
     { g: bg(0.01, 0.46, 0.56), p: [0.385, 0.97, 0], c: '#ffffff' },
   ]);
-  const partMat = track(new T.MeshPhongMaterial({
-    color: 0xd7ecff, vertexColors: true, transparent: true, opacity: 0.2, shininess: 90, specular: 0xffffff, side: T.DoubleSide, depthWrite: false,
+  // 투명 칸막이: 맑은 유리처럼 교실 빛이 비친다
+  const partMat = track(new T.MeshStandardMaterial({
+    color: 0xe0efff, vertexColors: true, transparent: true, opacity: 0.17, roughness: 0.06, metalness: 0, side: T.DoubleSide, depthWrite: false,
   }));
   const itemSets = [
     [{ g: bg(0.22, 0.02, 0.3), p: [-0.13, 0.742, 0.02], c: '#ff8fab' }, { g: bg(0.19, 0.035, 0.07), p: [0.2, 0.752, -0.12], c: '#90e0ef' }],
@@ -707,16 +782,18 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
   const seats = [];
   rows.forEach((rz, ri) => {
     cols.forEach((cx, ci) => {
-      scene.add(place(new T.Mesh(deskBase, vmat), cx, 0, rz));
-      scene.add(place(new T.Mesh(itemSets[(ri + ci) % 3], vmat), cx, 0, rz));
+      scene.add(cast(place(new T.Mesh(deskBase, vmat), cx, 0, rz)));
+      scene.add(cast(place(new T.Mesh(itemSets[(ri + ci) % 3], vmat), cx, 0, rz)));
       const part = place(new T.Mesh(partGeo, partMat), cx, 0, rz);
       part.renderOrder = 2;
       scene.add(part);
-      scene.add(place(new T.Mesh(chairGeo, vmat), cx, 0, rz + 0.75));
+      scene.add(cast(place(new T.Mesh(chairGeo, vmat), cx, 0, rz + 0.75)));
+      ao(cx, rz, 0.82, 0.62, 0.48);
+      ao(cx, rz + 0.75, 0.48, 0.46, 0.3);
       solid(cx, rz + 0.34, 0.4, 0.66);
       seats.push({ kind: 'chair', x: cx, z: rz + 0.75, rot: Math.PI, approach: { x: cx, z: rz + 1.62 }, taken: false });
       if ((ri * 5 + ci) % 3 === 1) {
-        const bagM = new T.Mesh(bagGeos[(ri + ci * 2) % bagGeos.length], vmat);
+        const bagM = cast(new T.Mesh(bagGeos[(ri + ci * 2) % bagGeos.length], vmat));
         scene.add(place(bagM, cx + 0.47, 0.32, rz + 0.12));
         bagM.rotation.y = 0.2;
         box(0.012, 0.3, 0.012, '#2b2f38', cx + 0.4, 0.64, rz + 0.12);
@@ -732,7 +809,7 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
     });
     drawFlower(g, w / 2, h / 2, 62); // 우리 반 꽃이 러그 한가운데에
   });
-  const rug = new T.Mesh(new T.CircleGeometry(2.0, 40), new T.MeshLambertMaterial({ map: rugTex }));
+  const rug = new T.Mesh(new T.CircleGeometry(2.0, 48), L({ map: rugTex, roughness: 1 }));
   rug.rotation.x = -Math.PI / 2;
   rug.position.set(RUG.x, 0.02, RUG.z);
   scene.add(rug);
@@ -740,7 +817,7 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
     const a = (i / 6) * Math.PI * 2 + 0.3;
     const cx = RUG.x + Math.cos(a) * 1.5;
     const cz = RUG.z + Math.sin(a) * 1.5;
-    const cu = new T.Mesh(new T.SphereGeometry(0.3, 14, 10), M([0xff8fab, 0x90e0ef, 0xffd166, 0xb5e48c, 0xc7a6ff, 0xffa07a][i]));
+    const cu = cast(new T.Mesh(new T.SphereGeometry(0.3, 18, 12), M([0xff8fab, 0x90e0ef, 0xffd166, 0xb5e48c, 0xc7a6ff, 0xffa07a][i], { roughness: 0.95 })));
     cu.scale.y = 0.45;
     scene.add(place(cu, cx, 0.16, cz));
     // 쿠션에 앉을 때는 러그 한가운데를 바라본다
@@ -790,8 +867,11 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
       });
     }
     g.scale.setScalar(scale);
-    parent.add(place(g, x, onFloor ? 0 : 0.94, z));
-    if (onFloor) colliders.push({ x, z, r: 0.32 * scale });
+    parent.add(place(cast(g), x, onFloor ? 0 : 0.94, z));
+    if (onFloor) {
+      colliders.push({ x, z, r: 0.32 * scale });
+      ao(x, z, 0.7 * scale, 0.7 * scale, 0.5, true);
+    }
   }
   [[6.45, -5.3], [-1.95, 5.45], [6.45, 1.2]].forEach(([x, z]) => plant(x, z));
   if (flowerMap) {
@@ -840,6 +920,110 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
   dustGeo.setAttribute('position', new T.BufferAttribute(dp, 3));
   const dust = new T.Points(dustGeo, new T.PointsMaterial({ size: 0.08, map: softDot, color: 0xfff4d0, transparent: true, opacity: 0.5, depthWrite: false, sizeAttenuation: true }));
   scene.add(dust);
+
+  // ── 마무리: 바닥 그늘(AO) 굽기, 벽 모서리 그늘, 그림자 표시 ──
+  // 바닥 그늘: 벽 가장자리와 가구 밑을 부드럽게 어둡게 그린 그림을 바닥의 aoMap 으로 쓴다 (그리는 비용 없음)
+  {
+    const AW = 1024;
+    const AH = Math.round((AW * ROOM.z) / ROOM.x);
+    const ppm = AW / (ROOM.x * 2); // 1m 당 픽셀. 그림의 위쪽이 앞벽(-z), 왼쪽이 창문 벽(-x)
+    const aoTex = canvasTex(AW, AH, (g, w, h) => {
+      g.fillStyle = '#ffffff';
+      g.fillRect(0, 0, w, h);
+      const E = 0.55 * ppm;
+      for (const [x0, y0, x1, y1, rx, ry, rw, rh] of [
+        [0, 0, 0, E, 0, 0, w, E], [0, h, 0, h - E, 0, h - E, w, E], [0, 0, E, 0, 0, 0, E, h], [w, 0, w - E, 0, w - E, 0, E, h],
+      ]) {
+        const gr = g.createLinearGradient(x0, y0, x1, y1);
+        gr.addColorStop(0, 'rgba(0,0,0,.4)');
+        gr.addColorStop(0.35, 'rgba(0,0,0,.14)');
+        gr.addColorStop(1, 'rgba(0,0,0,0)');
+        g.fillStyle = gr;
+        g.fillRect(rx, ry, rw, rh);
+      }
+      // 가구 밑: 그림 밖에 그린 모양의 흐린 그림자만 그림 안에 떨어지게 한다 (shadowBlur 는 어느 브라우저나 된다)
+      const OFF = w * 3;
+      for (const s of aoSpots) {
+        const cx = (s.x + ROOM.x) * ppm;
+        const cy = (s.z + ROOM.z) * ppm;
+        const sw = s.w * ppm * 0.86;
+        const sd = s.d * ppm * 0.86;
+        g.save();
+        g.shadowColor = `rgba(0,0,0,${s.k})`;
+        g.shadowBlur = clamp(Math.min(sw, sd) * 0.4, 6, 40);
+        g.shadowOffsetX = OFF;
+        g.fillStyle = '#000000';
+        if (s.round) {
+          g.beginPath();
+          g.ellipse(cx - OFF, cy, sw / 2.4, sd / 2.4, 0, 0, Math.PI * 2);
+          g.fill();
+        } else {
+          g.fillRect(cx - OFF - sw / 2, cy - sd / 2, sw, sd);
+        }
+        g.restore();
+      }
+    });
+    aoTex.colorSpace = T.NoColorSpace; // 밝기 값 그대로 쓴다
+    floorMat.aoMap = aoTex;
+    floorMat.aoMapIntensity = 1;
+    floorMat.needsUpdate = true;
+  }
+  // 벽 모서리 그늘: 바닥·천장과 만나는 곳이 살짝 어둡다 (옅은 그러데이션 띠)
+  {
+    const aoGrad = canvasTex(8, 128, (g, w, h) => {
+      const gr = g.createLinearGradient(0, h, 0, 0);
+      gr.addColorStop(0, 'rgba(255,255,255,1)');
+      gr.addColorStop(0.4, 'rgba(255,255,255,.38)');
+      gr.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = gr;
+      g.fillRect(0, 0, w, h);
+    });
+    const aoMat = (k) => track(new T.MeshBasicMaterial({ color: 0x2e2216, map: aoGrad, transparent: true, opacity: k, depthWrite: false }));
+    const low = aoMat(0.2);
+    const high = aoMat(0.13);
+    const strip = (mat, w, h, x, y, z, rx, ry, rz) => {
+      const m = new T.Mesh(new T.PlaneGeometry(w, h), mat);
+      m.position.set(x, y, z);
+      m.rotation.set(rx, ry, rz);
+      m.renderOrder = 1;
+      scene.add(m);
+    };
+    const BH = 0.38; // 바닥 쪽 띠 높이
+    const TH = 0.5; // 천장 쪽 띠 높이
+    const e = 0.068; // 걸레받이 바로 앞
+    // 앞벽·뒷벽
+    for (const [zz, ry] of [[-ROOM.z + e, 0], [ROOM.z - e, Math.PI]]) {
+      strip(low, ROOM.x * 2, BH, 0, BH / 2, zz, 0, ry, 0);
+      strip(high, ROOM.x * 2, TH, 0, ROOM.h - TH / 2, zz * 0.999, 0, ry, Math.PI);
+    }
+    // 오른쪽 벽 (문 자리는 비운다)
+    for (const [a, b] of [[-ROOM.z, DZ - 0.6], [DZ + 0.6, ROOM.z]]) {
+      strip(low, b - a, BH, ROOM.x - e, BH / 2, (a + b) / 2, 0, -Math.PI / 2, 0);
+      strip(high, b - a, TH, ROOM.x - e * 0.999, ROOM.h - TH / 2, (a + b) / 2, 0, -Math.PI / 2, Math.PI);
+    }
+    // 창문 벽 위쪽
+    strip(high, ROOM.z * 2, TH, -ROOM.x + 0.02, ROOM.h - TH / 2, 0, 0, Math.PI / 2, Math.PI);
+    // 천장 가장자리
+    const ch = ROOM.h - 0.004;
+    strip(high, ROOM.x * 2, TH, 0, ch, -ROOM.z + TH / 2, Math.PI / 2, 0, 0);
+    strip(high, ROOM.x * 2, TH, 0, ch, ROOM.z - TH / 2, Math.PI / 2, 0, Math.PI);
+    strip(high, ROOM.z * 2, TH, -ROOM.x + TH / 2, ch, 0, Math.PI / 2, 0, -Math.PI / 2);
+    strip(high, ROOM.z * 2, TH, ROOM.x - TH / 2, ch, 0, Math.PI / 2, 0, Math.PI / 2);
+  }
+  // 그림자: 가구(cast 표시)만 햇빛 그림자를 드리우고, 교실 안의 빛 받는 물건은 모두 그림자를 받는다.
+  //  사람·토끼는 나중에 만들어져 여기서 빠진다 (발밑 둥근 그림자, 늘 햇빛을 받아 또렷하게 보인다)
+  {
+    scene.updateMatrixWorld(true);
+    const c = new T.Vector3();
+    scene.traverse((o) => {
+      if (!o.isMesh || !o.material || !o.material.isMeshStandardMaterial || o.material.transparent) return;
+      if (!o.geometry.boundingSphere) o.geometry.computeBoundingSphere();
+      c.copy(o.geometry.boundingSphere.center).applyMatrix4(o.matrixWorld);
+      const inside = Math.abs(c.x) < ROOM.x + 1 && Math.abs(c.z) < ROOM.z + 1 && c.y < ROOM.h + 0.5;
+      o.receiveShadow = inside;
+      o.castShadow = inside && Boolean(o.userData.cast);
+    });
+  }
 
   // 길 찾기 지도는 가구를 다 놓은 뒤에 만든다 (사람이나 토끼는 가구가 아니다)
   const nav = makeNav(colliders);
@@ -1174,7 +1358,7 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
     return warnTexes[icon];
   };
   function addWarn(n, rule) {
-    const sprite = new T.Sprite(new T.SpriteMaterial({ map: warnTex(rule.icon), transparent: true, depthTest: false, depthWrite: false }));
+    const sprite = new T.Sprite(new T.SpriteMaterial({ map: warnTex(rule.icon), transparent: true, depthTest: false, depthWrite: false, toneMapped: false }));
     sprite.scale.set(0.62, 0.62, 1);
     sprite.position.set(0, 2.78, 0);
     sprite.renderOrder = 20;
@@ -1438,29 +1622,57 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
     rug: { x: RUG.x, z: RUG.z, r: 1.6 },
     board: { x: 0.1, z: -4.6, r: 1.7 },
   };
-  const iconTex = (icon) => canvasTex(128, 128, (g) => {
-    g.font = '88px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
-    g.fillText(icon, 64, 70);
+  // 아이콘 배지: 하얀 동그라미 위에 그림 글자 (멀리서도 잘 보이게 테두리와 그림자)
+  const iconTex = (icon) => canvasTex(192, 192, (g) => {
+    g.fillStyle = 'rgba(43,45,66,.22)';
+    g.beginPath(); g.arc(96, 104, 78, 0, Math.PI * 2); g.fill();
+    g.fillStyle = '#ffffff';
+    g.beginPath(); g.arc(96, 96, 78, 0, Math.PI * 2); g.fill();
+    g.lineWidth = 8; g.strokeStyle = '#2b2d42'; g.stroke();
+    g.font = '96px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(icon, 96, 104);
   });
+  // 바닥 동그라미: 가장자리는 또렷한 띠, 안쪽은 은은하게 빛난다 (점선이 천천히 돈다)
+  const ringTex = canvasTex(256, 256, (g, w) => {
+    const c = w / 2;
+    const glow = g.createRadialGradient(c, c, c * 0.55, c, c, c * 0.97);
+    glow.addColorStop(0, 'rgba(255,255,255,0)');
+    glow.addColorStop(1, 'rgba(255,255,255,.4)');
+    g.fillStyle = glow;
+    g.beginPath(); g.arc(c, c, c * 0.97, 0, Math.PI * 2); g.fill();
+    g.strokeStyle = '#ffffff';
+    g.lineWidth = 12;
+    g.beginPath(); g.arc(c, c, c * 0.9, 0, Math.PI * 2); g.stroke();
+    g.lineWidth = 7;
+    for (let i = 0; i < 24; i += 1) {
+      g.beginPath(); g.arc(c, c, c * 0.76, (i / 24) * Math.PI * 2, (i / 24 + 0.022) * Math.PI * 2); g.stroke();
+    }
+  });
+  // 빛기둥: 가운데가 밝고 가장자리·위쪽으로 갈수록 스르르 사라진다 (위로 흐르는 빛결)
+  const beamMat = () => track(new T.ShaderMaterial({
+    uniforms: { color: { value: new T.Color(0xfff0a0) }, opacity: { value: 0.5 }, time: { value: 0 } },
+    vertexShader: 'varying vec3 vN; varying vec3 vV; varying float vY; void main() { vec4 mv = modelViewMatrix * vec4(position, 1.0); vN = normalize(normalMatrix * normal); vV = normalize(-mv.xyz); vY = uv.y; gl_Position = projectionMatrix * mv; }',
+    fragmentShader: 'uniform vec3 color; uniform float opacity; uniform float time; varying vec3 vN; varying vec3 vV; varying float vY; void main() { float face = abs(dot(normalize(vN), normalize(vV))); float core = face * face; float fade = pow(1.0 - vY, 1.6) * smoothstep(0.0, 0.06, vY); float flow = 0.8 + 0.2 * sin(vY * 26.0 - time * 2.6); gl_FragColor = vec4(color * core * fade * flow * opacity, 1.0); }',
+    transparent: true, depthWrite: false, blending: T.AdditiveBlending, side: T.DoubleSide,
+  }));
   const markers = {};
   for (const [id, s] of Object.entries(stops)) {
     const ring = new T.Mesh(
-      new T.RingGeometry(s.r - 0.16, s.r, 48),
-      new T.MeshBasicMaterial({ color: 0x7be0a4, transparent: true, opacity: 0.8, side: T.DoubleSide, depthWrite: false })
+      new T.PlaneGeometry(s.r * 2.1, s.r * 2.1),
+      new T.MeshBasicMaterial({ map: ringTex, color: 0x7be0a4, transparent: true, opacity: 0.9, depthWrite: false, toneMapped: false })
     );
     ring.rotation.x = -Math.PI / 2;
-    ring.position.set(s.x, 0.05, s.z);
+    ring.position.set(s.x, 0.035, s.z);
+    ring.renderOrder = 1;
     scene.add(ring);
-    const icon = new T.Sprite(new T.SpriteMaterial({ map: iconTex({ window: '👀', rug: '🌬️', board: '✏️' }[id]), transparent: true, depthWrite: false }));
-    icon.scale.set(0.9, 0.9, 1);
+    const icon = new T.Sprite(new T.SpriteMaterial({ map: iconTex({ window: '👀', rug: '🌬️', board: '✏️' }[id]), transparent: true, depthWrite: false, toneMapped: false }));
+    icon.scale.set(0.62, 0.62, 1);
     icon.position.set(s.x, 2.3, s.z);
     scene.add(icon);
     // 멀리서도 보이는 빛기둥: 아직 못 받은 별 자리만 환하게 서 있다
-    const pillar = new T.Mesh(
-      new T.CylinderGeometry(0.45, 0.45, 3.1, 20, 1, true),
-      new T.MeshBasicMaterial({ color: 0xfff1a8, transparent: true, opacity: 0.2, side: T.DoubleSide, depthWrite: false, blending: T.AdditiveBlending, fog: false })
-    );
+    const pillar = new T.Mesh(new T.CylinderGeometry(0.42, 0.5, 3.1, 28, 1, true), beamMat());
     pillar.position.set(s.x, 1.55, s.z);
+    pillar.renderOrder = 3;
     scene.add(pillar);
     markers[id] = { ring, icon, pillar, base: 2.3 };
   }
@@ -1519,8 +1731,32 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
     hiding = on;
     player.visible = !on;
     bunny.group.visible = !on;
+    dust.visible = !on; // 칠판 바로 앞을 떠다니는 먼지가 얼룩처럼 보이지 않게
     for (const n of crowd) n.group.visible = !on;
     for (const p of peers.values()) p.group.visible = !on;
+  };
+
+  // 이름표 크기: 멀리서는 원래 크기, 내 캐릭터까지의 거리(약 5m)보다 가까우면 거리에 맞춰 줄여 화면에서 더 커지지 않고,
+  //  아주 가까우면 흐려진다 (가까이 온 친구의 이름표가 화면을 덮지 않게)
+  const tagPos = new T.Vector3();
+  const fitTag = (ch) => {
+    const tg = ch.userData.tag;
+    if (!tg) return;
+    tg.getWorldPosition(tagPos);
+    const d = camera.position.distanceTo(tagPos);
+    const k = clamp(d / 5, 0.3, 1);
+    const [bw, bh] = tg.userData.base;
+    tg.scale.set(bw * k, bh * k, 1);
+    tg.material.opacity = clamp((d - 1.2) / 1.6, 0, 1);
+  };
+  // 카메라가 사람 몸 안이나 머리 바로 앞에 있다 (그 사람을 잠깐 숨겨 화면을 가리지 않게)
+  const camInside = (g) => {
+    const s = g.scale.y;
+    const dx = camera.position.x - g.position.x;
+    const dz = camera.position.z - g.position.z;
+    const dy = camera.position.y - g.position.y;
+    if (dy > -0.2 && dy < 2.0 * s && Math.hypot(dx, dz) < 0.55 * g.scale.x) return true;
+    return Math.hypot(dx, dy - 1.2 * s, dz) < 1.25;
   };
 
   return {
@@ -1587,10 +1823,11 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
       dust.geometry.attributes.position.needsUpdate = true;
       for (const [id, m] of Object.entries(markers)) {
         const doneIt = st.stars.has(id);
-        m.ring.material.color.setHex(doneIt ? 0xffe27a : 0x7be0a4);
-        m.ring.material.opacity = (doneIt ? 0.35 : 0.55) + Math.sin(t * 2.2) * 0.2;
-        const sc = 1 + Math.sin(t * 2.2) * 0.03;
+        m.ring.material.color.setHex(doneIt ? 0xffd75e : 0x6fdc9c);
+        m.ring.material.opacity = (doneIt ? 0.5 : 0.75) + Math.sin(t * 2.2) * 0.15;
+        const sc = 1 + Math.sin(t * 2.2) * 0.025;
         m.ring.scale.set(sc, sc, 1);
+        m.ring.rotation.z = t * 0.22;
         m.icon.position.y = m.base + Math.sin(t * 1.8) * 0.1;
         m.icon.material.opacity = clamp((camera.position.distanceTo(m.icon.position) - 1.2) / 1.6, 0, 1);
         m.ring.visible = !hiding; // 칠판에 낙서하는 동안은 별 자리 표시가 칠판을 가리지 않게 숨긴다
@@ -1598,13 +1835,21 @@ export function buildScene(T, { user, emoji, npcs, room, self, world = null, boa
         m.pillar.visible = !doneIt && !hiding;
         // 카메라가 기둥 안이나 바로 곁에 있으면 화면이 하얘지니 흐리게 한다
         const near = Math.hypot(camera.position.x - stops[id].x, camera.position.z - stops[id].z);
-        m.pillar.material.opacity = (0.16 + Math.sin(t * 2.2 + 1) * 0.07) * clamp((near - 1.2) / 2.4, 0, 1);
+        m.pillar.material.uniforms.opacity.value = (0.3 + Math.sin(t * 2.2 + 1) * 0.08) * clamp((near - 1.6) / 3, 0, 1);
+        m.pillar.material.uniforms.time.value = t;
         if (doneIt && m.icon.material.map !== doneStarTex) { m.icon.material.map = doneStarTex; m.icon.material.needsUpdate = true; }
       }
+      // 이름표: 카메라에 가까워지면 작아지고 흐려져서 화면을 가리지 않는다.
+      // 카메라가 사람 몸 안까지 들어가면 그 사람은 잠깐 숨긴다 (머리 속이 화면을 덮지 않게)
+      fitTag(player);
+      for (const n of crowd) { fitTag(n.group); n.group.visible = !hiding && !camInside(n.group); }
+      for (const p of peers.values()) { fitTag(p.group); p.group.visible = !hiding && !camInside(p.group); }
     },
     dispose() {
       scene.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
       tb.dispose();
+      if (envRT) envRT.dispose();
+      if (sun.shadow.map) sun.shadow.map.dispose();
     },
   };
 }

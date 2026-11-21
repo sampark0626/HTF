@@ -9,7 +9,7 @@ const HOST = { hall1: 'room', hall2: 'hall1', wc: 'hall2', stairs: 'hall2' }; //
 
 export function buildHalls(T, ctx) {
   const { scene, colliders, tb, theme, school, label, catalog, view, door } = ctx;
-  const { M, canvasTex, track } = tb;
+  const { M, L, canvasTex, track } = tb;
   const root = new T.Group();
   scene.add(root);
   const built = new Set();
@@ -25,7 +25,7 @@ export function buildHalls(T, ctx) {
     return m;
   };
   const panel = (tex, w, h, x, y, z, ry = 0, lit = false, opts = {}, parent = root) => {
-    const mat = track(lit ? new T.MeshLambertMaterial({ map: tex, ...opts }) : new T.MeshBasicMaterial({ map: tex, ...opts }));
+    const mat = lit ? L({ map: tex, ...opts }) : track(new T.MeshBasicMaterial({ map: tex, ...opts }));
     const m = new T.Mesh(new T.PlaneGeometry(w, h), mat);
     m.position.set(x, y, z);
     m.rotation.y = ry;
@@ -105,7 +105,7 @@ export function buildHalls(T, ctx) {
     const d = zr.z1 - zr.z0;
     const cx = (zr.x0 + zr.x1) / 2;
     const cz = (zr.z0 + zr.z1) / 2;
-    const floor = new T.Mesh(new T.PlaneGeometry(w, d), track(new T.MeshLambertMaterial({ map: floorTexture })));
+    const floor = new T.Mesh(new T.PlaneGeometry(w, d), L({ map: floorTexture, roughness: 0.45 }));
     floor.rotation.x = -Math.PI / 2;
     floor.position.set(cx, zr.y + 0.003, cz);
     root.add(floor);
@@ -229,7 +229,7 @@ export function buildHalls(T, ctx) {
     panel(mapTexture, 2.3, 1.9, 7.37, 1.7, -1.0, Math.PI / 2);
     // 트로피장
     box(0.45, 1.2, 1.5, '#cba67a', 7.55, 0.6, 1.4);
-    const glass = new T.Mesh(new T.BoxGeometry(0.4, 0.7, 1.4), track(new T.MeshPhongMaterial({ color: 0xd7ecff, transparent: true, opacity: 0.25, shininess: 80, depthWrite: false })));
+    const glass = new T.Mesh(new T.BoxGeometry(0.4, 0.7, 1.4), track(new T.MeshStandardMaterial({ color: 0xe0efff, transparent: true, opacity: 0.2, roughness: 0.05, metalness: 0, depthWrite: false })));
     glass.position.set(7.58, 1.55, 1.4);
     root.add(glass);
     box(0.4, 0.04, 1.4, '#cba67a', 7.58, 1.2, 1.4);
@@ -373,7 +373,7 @@ export function buildHalls(T, ctx) {
     ceil.rotation.x = Math.PI / 2;
     ceil.position.set((zr.x0 + zr.x1) / 2, zr.h, (zr.z0 + zr.z1) / 2);
     root.add(ceil);
-    const floor0 = new T.Mesh(new T.PlaneGeometry(zr.x1 - zr.x0, zr.z1 - zr.z0), track(new T.MeshLambertMaterial({ map: tileTex(zr.x1 - zr.x0, zr.z1 - zr.z0) })));
+    const floor0 = new T.Mesh(new T.PlaneGeometry(zr.x1 - zr.x0, zr.z1 - zr.z0), L({ map: tileTex(zr.x1 - zr.x0, zr.z1 - zr.z0), roughness: 0.45 }));
     floor0.rotation.x = -Math.PI / 2;
     floor0.position.set((zr.x0 + zr.x1) / 2, 0.003, (zr.z0 + zr.z1) / 2);
     root.add(floor0);

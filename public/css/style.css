@@ -909,3 +909,67 @@ body.hz-open { overflow: hidden; }
 }
 .wd-hint { display: none; text-align: center; opacity: .7; font-size: .9rem; }
 @media (orientation: portrait) and (max-width: 700px) { .wd-hint { display: block; } }
+
+/* ───────── 다듬기: 반짝이는 버튼·햇살 배경 · 쉼터 들어가기 카드 · 쉼터 화면 ───────── */
+/* 버튼 위쪽에 은은한 윤기 (사탕처럼 말랑해 보이게) */
+.btn { background: linear-gradient(180deg, rgba(255, 255, 255, .34) 0%, rgba(255, 255, 255, .08) 48%, rgba(255, 255, 255, 0) 52%), var(--bg); }
+/* 하늘 배경 오른쪽 위에 따뜻한 햇살 */
+body {
+  background:
+    radial-gradient(90% 60% at 88% -8%, rgba(255, 241, 186, .9) 0%, rgba(255, 241, 186, 0) 60%),
+    linear-gradient(180deg, #b9e2ff 0%, #e4f4ff 48%, #fff3d1 100%);
+  background-attachment: fixed;
+}
+
+/* 쉼터 들어가기 카드: 노는 법을 그림 타일로 */
+.world-intro { width: min(580px, 100%); gap: 10px; padding: 20px 22px; background: linear-gradient(180deg, #fffaf0 0%, #fff 34%); }
+.wi-lead { font-size: 1.1rem; }
+.wi-tips { width: 100%; display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 2px 0; }
+.wi-tip {
+  display: grid; justify-items: center; align-content: start; gap: 4px; padding: 10px 6px 9px; text-align: center;
+  background: var(--soft); border: 3px solid var(--ink); border-radius: 18px; box-shadow: 0 3px 0 var(--ink);
+  font-size: .92rem; line-height: 1.25; animation: pop-in .4s calc(var(--k) * .06s + .12s) cubic-bezier(.2, 1.6, .3, 1) both;
+}
+.wi-tip:nth-child(6n+1) { background: #fff3c4; }
+.wi-tip:nth-child(6n+2) { background: #e3f1ff; }
+.wi-tip:nth-child(6n+3) { background: #fff0c9; }
+.wi-tip:nth-child(6n+4) { background: #ffe4ec; }
+.wi-tip:nth-child(6n+5) { background: #e7f8ee; }
+.wi-tip:nth-child(6n+6) { background: #efe7ff; }
+.wi-tip i { font-style: normal; font-size: 1.9rem; line-height: 1.1; }
+.wi-tip b { font-weight: 400; color: var(--blue-d); }
+.wi-keys { opacity: .55; font-size: .85rem; }
+@media (max-width: 430px) {
+  .wi-tips { grid-template-columns: repeat(2, 1fr); gap: 6px; }
+  .wi-tip { padding: 8px 4px; font-size: .86rem; }
+  .wi-tip i { font-size: 1.6rem; }
+  .wi-emoji { font-size: 3.4rem; }
+  .world-intro h2 { font-size: 1.7rem; }
+  .world-intro { padding: 16px 14px; }
+  .wi-keys { display: none; }
+}
+
+/* 쉼터 화면: 위쪽 알약과 안내 카드에 윤기, 조이스틱은 방향이 보이게 */
+.wh-pill, .wh-btn, .wh-guide { background: linear-gradient(180deg, #fff 0%, #fff 55%, #f4f7ff 100%); }
+.wh-guide { box-shadow: 0 4px 0 var(--ink), 0 10px 24px rgba(43, 45, 66, .12); }
+.wh-arrow { background: radial-gradient(circle at 35% 30%, #ffe28a, var(--yellow) 60%); }
+.wh-joy {
+  background:
+    radial-gradient(circle, rgba(255, 255, 255, 0) 0 34%, rgba(255, 255, 255, .5) 35% 100%),
+    conic-gradient(from -45deg, rgba(43, 45, 66, .08) 0 25%, rgba(43, 45, 66, 0) 0 50%, rgba(43, 45, 66, .08) 0 75%, rgba(43, 45, 66, 0) 0);
+  border-color: rgba(43, 45, 66, .5);
+  box-shadow: 0 6px 18px rgba(43, 45, 66, .15), inset 0 0 0 6px rgba(255, 255, 255, .45);
+}
+.wh-joy::before {
+  content: ''; position: absolute; inset: 8px; pointer-events: none;
+  background: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100' fill='rgba(43,45,66,.38)'><path d='M50 3l8 10H42z'/><path d='M50 97l8-10H42z'/><path d='M3 50l10-8v16z'/><path d='M97 50l-10-8v16z'/></svg>") center / 100% 100% no-repeat;
+}
+.wh-knob { background: radial-gradient(circle at 35% 30%, #ffe9a6, var(--yellow) 55%, #f2b200); box-shadow: 0 4px 0 rgba(43, 45, 66, .35); }
+.wh-hint { white-space: nowrap; box-shadow: 0 4px 14px rgba(43, 45, 66, .12); }
+@media (max-width: 430px) { .wh-hint { font-size: .82rem; top: calc(150px + env(safe-area-inset-top)); } }
+/* 3D 화면 가장자리를 아주 살짝 어둡게 (사진처럼 가운데로 눈이 가게). 낙서할 때는 칠판이 고르게 보이도록 끈다 */
+.world-stage::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background: radial-gradient(ellipse 75% 70% at 50% 46%, rgba(46, 32, 20, 0) 60%, rgba(46, 32, 20, .17) 100%);
+}
+.world.drawing .world-stage::after { display: none; }

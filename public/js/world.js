@@ -127,9 +127,14 @@ export async function startWorld({ user, preview = false, visit = null, room = n
   const stage = $('#w-stage');
   stage.appendChild(renderer.domElement);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.6));
+  // 색감: 밝은 곳이 하얗게 날아가지 않게 부드럽게 눌러 주고(Neutral), 가구는 햇빛 그림자를 드리운다
+  renderer.toneMapping = T.NeutralToneMapping;
+  renderer.toneMappingExposure = 1.06;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = T.PCFShadowMap;
 
   // ───────── 장면 만들기 ─────────
-  const world = buildScene(T, { user, emoji, npcs, room, self, world: worldInfo, boardImage: board });
+  const world = buildScene(T, { user, emoji, npcs, room, self, world: worldInfo, boardImage: board, renderer });
   const { scene, camera, player, colliders, stops, bunny, halls, view } = world;
   const canBuy = Boolean(buy) && !visit;
   const crowd = world.npcs;
@@ -161,6 +166,10 @@ export async function startWorld({ user, preview = false, visit = null, room = n
   pos.set(START.x, 0, START.z); // 창가 쪽 열린 공간에서 시작해 칠판을 바라본다 (뒤에 카메라가 놓일 자리가 있다)
   player.rotation.y = Math.PI;
   state.yaw = 0;
+  // 카메라도 처음부터 내 뒤에 둔다 (교실 밖에서 날아 들어오지 않고, 들어가기 카드 뒤로 교실이 흐릿하게 보인다)
+  state.camPos.set(pos.x + Math.sin(state.yaw) * Math.cos(state.pitch) * 5, 1 + Math.sin(state.pitch) * 5, pos.z + Math.cos(state.yaw) * Math.cos(state.pitch) * 5);
+  camera.position.copy(state.camPos);
+  camera.lookAt(pos.x, 1, pos.z);
 
   function resize() {
     const w = stage.clientWidth || window.innerWidth;
@@ -795,8 +804,9 @@ export async function startWorld({ user, preview = false, visit = null, room = n
     for (const [key, s] of says) {
       const target = key === 'me' ? player : s.group || (s.peer && s.peer.group);
       if (now > s.until || !target || (s.peer && !world.peers.has(s.peer.id))) { s.el.remove(); says.delete(key); continue; } // eslint-disable-line no-continue
-      // 가까이 있으면 이미 이름표 말풍선에 같은 말이 나오니 겹치지 않게 숨긴다. 낙서하는 동안에는 모두 숨긴다
-      s.el.style.display = state.drawing || (s.peer && state.nearKey === `peer:${s.peer.kind}`) ? 'none' : '';
+      // 가까이 있으면 이미 이름표 말풍선에 같은 말이 나오니 겹치지 않게 숨긴다. 낙서하는 동안과
+      // 카메라 바로 앞이라 그 사람이 잠깐 숨은 동안에도 숨긴다
+      s.el.style.display = state.drawing || !target.visible || (s.peer && state.nearKey === `peer:${s.peer.kind}`) ? 'none' : '';
       placeOver(s.el, target, 2.45 + Math.sin(t * 3) * 0.02);
     }
   }
@@ -978,24 +988,28 @@ export async function startWorld({ user, preview = false, visit = null, room = n
       $('#w-skip').onclick = () => finishOnce({ visit: true, stars: 0, seconds: 0, skipped: true });
       return;
     }
+    // 어떻게 노는지: 긴 글 대신 그림 타일로 한눈에 (키보드 안내는 작은 글씨로)
+    const tips = [
+      ['🕹️', '조이스틱으로', '천천히 걸어요'],
+      ['👆', '화면을 끌면', '시점이 돌아가요'],
+      ['⭐', `빛기둥을 찾아`, `마음 별 ${TOUR_STARS}개`],
+      ['🌟', '약속을 어긴 친구를', '다정하게 타일러요'],
+      ['🖍️', '칠판 앞에서', '마음껏 낙서해요'],
+      ['👀', '창밖 먼 곳을 보며', '눈도 쉬어요'],
+    ];
     card.innerHTML = `
       <div class="world-intro">
         <div class="wi-emoji">🌈</div>
         <h2>마음 쉼터</h2>
         ${room?.label ? `<p class="wi-room">🏫 ${esc(room.label)}</p>` : ''}
-        <p>숙제를 모두 끝낸 선물이에요.<br>교실을 천천히 걸으며 <b>5분</b> 동안 눈과 마음을 쉬어요.</p>
+        <p class="wi-lead">숙제를 모두 끝낸 선물이에요.<br>교실을 천천히 걸으며 <b>5분</b> 동안 눈과 마음을 쉬어요.</p>
         <p class="wi-note wi-parent" id="w-pnote" hidden></p>
+        <div class="wi-tips">${tips.map(([i, a, b], k) => `<div class="wi-tip" style="--k:${k}"><i>${i}</i><span>${a}<br><b>${b}</b></span></div>`).join('')}</div>
         ${teachers.length ? `<p class="wi-note">🧑‍🏫 ${esc(teachers.join(', '))}도 교실에 계세요</p>` : ''}
-        <ul>
-          <li>🕹️ 왼쪽 조이스틱으로 걸어요 (키보드는 WASD)</li>
-          <li>👆 화면을 드래그하면 시점이 돌아가요</li>
-          <li>⭐ 마음 별 ${TOUR_STARS}개를 모아 보세요 (빛기둥과 화면 가장자리 화살표가 알려 줘요)</li>
-          <li>🌟 약속을 어기는 친구를 찾아 다정하게 타이르면 별을 더 받아요 (칠판 구석에 약속이 있어요)</li>
-          <li>🖍️ 칠판 앞에서 마음껏 낙서도 할 수 있어요</li>
-        </ul>
         ${canBuy && view.catalog.length ? `<p class="wi-note">🪙 쓸 수 있는 별 <b>⭐${view.stars}</b>개 · 교실 오른쪽 문 밖에 새 공간이 기다려요</p>` : ''}
         ${preview ? `<p class="wi-note">${canBuy ? '🌈 구경하는 시간이에요 (마음 별은 저장되지 않아요)' : '👪 미리보기예요 (마음 별은 저장되지 않아요)'}</p>` : ''}
         <button class="btn btn-yellow big" id="w-go">🚪 교실에 들어가기</button>
+        <small class="wi-keys">⌨️ 키보드: WASD·방향키로 걷기, Q/E 로 돌기</small>
         <button class="back-link" id="w-skip">다음에 할래요</button>
       </div>`;
     $('#w-go').onclick = beginTour;
@@ -1056,17 +1070,34 @@ export async function startWorld({ user, preview = false, visit = null, room = n
   // ───────── 루프 ─────────
   let raf = 0;
   let last = performance.now();
-  let slow = 0;
+  // 느린 기기: 처음 몇 초(그림 준비)는 빼고, 3초 넘게 28fps 아래로 버벅이면 한 단계씩 가볍게 한다
+  //  1) 해상도를 낮춘다  2) 그림자를 끈다 (재질을 한 번 다시 만든다)
+  //  (다른 앱에 갔다 와서 한 프레임이 아주 길어도 한꺼번에 세지 않게 0.25초까지만 센다)
+  const perf = { avg: 1 / 60, slowFor: 0, since: 0, lock: false };
+  function adapt(raw) {
+    const r = Math.min(raw, 0.25);
+    perf.since += r;
+    perf.avg += (r - perf.avg) * 0.05;
+    if (perf.lock || perf.since < 4) return;
+    perf.slowFor = perf.avg > 0.036 ? perf.slowFor + r : 0;
+    if (perf.slowFor < 3) return;
+    perf.slowFor = 0;
+    perf.since = 1.5; // 바꾼 뒤 잠깐 지켜본다
+    if (renderer.getPixelRatio() > 1) { renderer.setPixelRatio(1); resize(); return; }
+    if (renderer.shadowMap.enabled) {
+      renderer.shadowMap.enabled = false;
+      scene.traverse((o) => { if (o.material) o.material.needsUpdate = true; });
+    }
+  }
   function frame(now) {
     raf = requestAnimationFrame(frame);
-    const dt = Math.min(0.05, (now - last) / 1000);
+    const raw = (now - last) / 1000;
+    const dt = Math.min(0.05, raw);
     last = now;
     update(dt);
     syncPresence(now);
     renderer.render(scene, camera);
-    // 느린 기기: 해상도를 낮춰서 부드럽게
-    slow = dt > 0.034 ? slow + 1 : Math.max(0, slow - 1);
-    if (slow > 40 && renderer.getPixelRatio() > 1) { renderer.setPixelRatio(1); resize(); slow = 0; }
+    adapt(raw);
   }
   raf = requestAnimationFrame(frame);
 
@@ -1085,7 +1116,7 @@ export async function startWorld({ user, preview = false, visit = null, room = n
 
   showIntro();
   // 개발·점검용: localStorage.htf_debug = '1' 이면 밖에서 상태를 읽고 한 프레임씩 돌려 볼 수 있다
-  ctl.debug = { state, input, pos, player, camera, scene, stops, crowd, bunny, colliders, update, renderer, beginTour, finishTour, gainStar, nextGoal, world, applyPeers, speak, says, talkers, halls, view, buyDoor, nearBarrier, mis: world.mis, openDialog, tryFix, enterDraw, exitDraw, updateEdges };
+  ctl.debug = { state, input, pos, player, camera, scene, stops, crowd, bunny, colliders, update, renderer, beginTour, finishTour, gainStar, nextGoal, world, applyPeers, speak, says, talkers, halls, view, buyDoor, nearBarrier, mis: world.mis, openDialog, tryFix, enterDraw, exitDraw, updateEdges, perf };
   try { if (localStorage.getItem('htf_debug') === '1') window.__htfWorld = ctl; } catch (_) { /* 무시 */ }
   return ctl;
 }

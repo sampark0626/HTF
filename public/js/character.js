@@ -10,15 +10,19 @@ export const loadThree = () => { threePromise ||= import(THREE_URL); return thre
 
 // ────────────────────────────────────────────────────────────────
 // 재료 상자: 색 재질과 캔버스 그림을 한 곳에서 만들고 한꺼번에 치운다
+//  재질은 빛을 부드럽게 받는 무광(MeshStandardMaterial)이다. 교실의 빛 환경(roomEnvironment)과 햇빛을 함께 받아
+//  면마다 밝기가 자연스럽게 달라지고, 매끈한 곳(유리·머리카락·바닥)에는 은은한 반사가 생긴다.
 export function toolbox(T) {
   const mats = new Map();
   const textures = [];
   const extra = [];
   const M = (color, opts = {}) => {
     const key = `${color}|${JSON.stringify(opts)}`;
-    if (!mats.has(key)) mats.set(key, new T.MeshLambertMaterial({ color, ...opts }));
+    if (!mats.has(key)) mats.set(key, new T.MeshStandardMaterial({ color, roughness: 0.82, metalness: 0, ...opts }));
     return mats.get(key);
   };
+  // 그림(캔버스 텍스처)을 붙이는 무광 재질 (그림마다 하나씩 만든다)
+  const L = (opts = {}) => track(new T.MeshStandardMaterial({ roughness: 0.86, metalness: 0, ...opts }));
   const canvasTex = (w, h, draw, repeat) => {
     const c = document.createElement('canvas');
     c.width = w;
@@ -26,16 +30,66 @@ export function toolbox(T) {
     draw(c.getContext('2d'), w, h);
     const tex = new T.CanvasTexture(c);
     tex.colorSpace = T.SRGBColorSpace;
-    tex.anisotropy = 4;
+    tex.anisotropy = 8; // 비스듬히 보이는 바닥·벽 그림도 또렷하게 (기기가 못 하면 three 가 알아서 줄인다)
     if (repeat) { tex.wrapS = T.RepeatWrapping; tex.wrapT = T.RepeatWrapping; tex.repeat.set(repeat[0], repeat[1]); }
     textures.push(tex);
     return tex;
   };
   const track = (obj) => { extra.push(obj); return obj; }; // 나중에 dispose() 해야 하는 재질 같은 것
   return {
-    M, canvasTex, track,
+    M, L, canvasTex, track,
     dispose() { textures.forEach((t) => t.dispose()); mats.forEach((m) => m.dispose()); extra.forEach((o) => o.dispose && o.dispose()); },
   };
+}
+
+// 교실 같은 빛 환경(IBL): 천장의 형광등, 왼쪽 창으로 들어오는 하늘빛과 햇빛, 벽과 바닥에 튄 은은한 빛.
+//  three 의 PMREM 으로 한 번 구워서 scene.environment 로 쓴다 (돌려주는 render target 은 다 쓰면 dispose).
+//  wall: 반마다 다른 벽 색 (튄 빛이 살짝 그 색을 띤다)
+export function roomEnvironment(T, renderer, { wall = 0xf3eedf, floor = 0xd9ccb6, sky = 0xcfe6ff, sun = 0xfff0d2 } = {}) {
+  const env = new T.Scene();
+  const trash = [];
+  const basic = (color, k, side = T.FrontSide) => {
+    const m = new T.MeshBasicMaterial({ color, side });
+    m.color.multiplyScalar(k); // 1 보다 밝은 빛(HDR)
+    trash.push(m);
+    return m;
+  };
+  const shell = new T.BoxGeometry(14, 4, 12);
+  trash.push(shell);
+  // 상자 면 순서: +x(오른쪽 벽) -x(창문 벽) +y(천장) -y(바닥) +z(뒤 벽) -z(앞 벽)
+  //  벽·바닥에 튄 빛을 넉넉히 두어 벽처럼 서 있는 면도 고루 밝다 (형광등만 밝으면 벽이 칙칙해진다)
+  const room = new T.Mesh(shell, [
+    basic(wall, 0.85, T.BackSide), basic(wall, 0.75, T.BackSide), basic(0xffffff, 1.0, T.BackSide),
+    basic(floor, 0.78, T.BackSide), basic(wall, 0.82, T.BackSide), basic(wall, 0.85, T.BackSide),
+  ]);
+  room.position.y = 2;
+  env.add(room);
+  const panel = new T.BoxGeometry(1, 1, 1);
+  trash.push(panel);
+  const put = (mat, sx, sy, sz, x, y, z) => { const m = new T.Mesh(panel, mat); m.scale.set(sx, sy, sz); m.position.set(x, y, z); env.add(m); };
+  const lamp = basic(0xffffff, 3.2);
+  for (const x of [-4.2, 0.4, 4.6]) for (const z of [-3.6, 0.9, 4.2]) put(lamp, 1.3, 0.04, 0.65, x, 3.96, z);
+  const skyM = basic(sky, 2.2);
+  for (const z of [-3.9, 0, 3.9]) put(skyM, 0.04, 1.55, 2.9, -6.97, 1.78, z);
+  put(basic(sun, 4.5), 0.04, 0.75, 2.2, -6.95, 1.4, 0.6); // 해가 드는 창
+  const pmrem = new T.PMREMGenerator(renderer);
+  const rt = pmrem.fromScene(env, 0.04, 0.1, 40, { position: new T.Vector3(0, 1.3, 0) });
+  pmrem.dispose();
+  trash.forEach((o) => o.dispose());
+  return rt;
+}
+
+// 캐릭터의 가장자리에 은은한 빛(림 라이트)을 더해 배경에서 또렷하게 떠 보이게 한다 (제페토 같은 느낌)
+function addRim(T, mat, color = 0xfff3df, strength = 0.32) {
+  const rim = new T.Color(color).multiplyScalar(strength);
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.rimColor = { value: rim };
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform vec3 rimColor;')
+      .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\n\t{ float rimF = 1.0 - saturate( dot( normal, normalize( vViewPosition ) ) ); totalEmissiveRadiance += rimColor * rimF * rimF * rimF; }');
+  };
+  mat.customProgramCacheKey = () => 'htf-rim';
+  return mat;
 }
 
 // 여러 모양을 위치·회전·크기·색까지 정해서 하나의 geometry 로 합친다 (색은 꼭짓점 색으로 들어간다)
@@ -260,51 +314,64 @@ function drawFace(g, W, H, { iris, irisLight, irisDark, brow, lip, mood }) {
 export function characterKit(T, tb) {
   const { M, canvasTex, track } = tb;
   const tint = (a, b, t) => `#${new T.Color(a).lerp(new T.Color(b), t).getHexString()}`;
-  const vmat = M('#ffffff', { vertexColors: true });
-  const blobTex = canvasTex(64, 64, (g) => {
-    const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
-    gr.addColorStop(0, 'rgba(60,40,20,.38)');
-    gr.addColorStop(1, 'rgba(60,40,20,0)');
+  // 옷·피부: 살짝 보드라운 무광 + 가장자리 빛 (교실 가구와 따로 쓴다)
+  const vmat = track(addRim(T, new T.MeshStandardMaterial({ vertexColors: true, roughness: 0.66, metalness: 0 })));
+  // 발밑 그림자: 가운데는 진하고 가장자리로 갈수록 부드럽게
+  const blobTex = canvasTex(128, 128, (g) => {
+    const gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+    gr.addColorStop(0, 'rgba(48,34,22,.5)');
+    gr.addColorStop(0.35, 'rgba(48,34,22,.32)');
+    gr.addColorStop(0.7, 'rgba(48,34,22,.1)');
+    gr.addColorStop(1, 'rgba(48,34,22,0)');
     g.fillStyle = gr;
-    g.fillRect(0, 0, 64, 64);
+    g.fillRect(0, 0, 128, 128);
   });
-  // 머리카락 윤기: 위쪽에 둥근 빛 띠, 아래로 갈수록 살짝 어둡게
-  const hairTex = canvasTex(32, 128, (g, w, h) => {
+  // 머리카락: 정수리 아래에 둥근 윤기 띠, 아래로 갈수록 살짝 어둡게, 정수리에서 흘러내리는 머리카락 결
+  const hairTex = canvasTex(128, 256, (g, w, h) => {
     const gr = g.createLinearGradient(0, 0, 0, h);
-    gr.addColorStop(0, '#b9b9b9');
-    gr.addColorStop(0.16, '#d6d6d6');
+    gr.addColorStop(0, '#d4d4d4');
+    gr.addColorStop(0.2, '#ececec');
     gr.addColorStop(0.3, '#ffffff');
-    gr.addColorStop(0.42, '#dcdcdc');
-    gr.addColorStop(0.75, '#c4c4c4');
-    gr.addColorStop(1, '#a8a8a8');
+    gr.addColorStop(0.4, '#e4e4e4');
+    gr.addColorStop(0.72, '#cbcbcb');
+    gr.addColorStop(1, '#b4b4b4');
     g.fillStyle = gr;
     g.fillRect(0, 0, w, h);
+    let seed = 11;
+    const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+    for (let i = 0; i < 90; i += 1) { g.fillStyle = `rgba(0,0,0,${0.03 + rnd() * 0.07})`; g.fillRect(rnd() * w, 0, 1 + rnd() * 1.6, h); }
+    for (let i = 0; i < 46; i += 1) { g.fillStyle = `rgba(255,255,255,${0.05 + rnd() * 0.1})`; g.fillRect(rnd() * w, h * (0.16 + rnd() * 0.08), 1, h * 0.3); }
   });
+  hairTex.wrapS = T.RepeatWrapping;
 
+  // 머리를 덮는 구 조각의 u·v 를 "머리 둘레의 각도·정수리에서 잰 높이각"으로 바꾼다:
+  //  모자 조각과 옆머리 조각이 만나거나 겹치는 곳에서 윤기와 머리카락 결이 끊기지 않고 똑같이 이어진다
+  const absV = (g, t0, tl, p0 = 0, pl = Math.PI * 2) => {
+    const uv = g.attributes.uv;
+    for (let i = 0; i < uv.count; i += 1) {
+      uv.setXY(i, (p0 + uv.getX(i) * pl) / (Math.PI * 2), 1 - (t0 + (1 - uv.getY(i)) * tl) / Math.PI);
+    }
+    return g;
+  };
   const geo = new Map();
   const G = {
     sph: (r, w = 14, h = 10) => { const k = `s${r}|${w}|${h}`; if (!geo.has(k)) geo.set(k, new T.SphereGeometry(r, w, h)); return geo.get(k); },
     cap: (r, len) => { const k = `c${r}|${len}`; if (!geo.has(k)) geo.set(k, new T.CapsuleGeometry(r, len, 5, 12)); return geo.get(k); },
     cyl: (rt, rb, h, seg = 14) => { const k = `y${rt}|${rb}|${h}|${seg}`; if (!geo.has(k)) geo.set(k, new T.CylinderGeometry(rt, rb, h, seg)); return geo.get(k); },
     box: (w, h, d) => { const k = `b${w}|${h}|${d}`; if (!geo.has(k)) geo.set(k, new T.BoxGeometry(w, h, d)); return geo.get(k); },
-    // 앞쪽 gap(라디안)만큼 비워 둔 구의 한 조각. 모자 조각의 아랫단 색과 이어지게 v 를 맨 아래 값으로 고정한다
+    // 앞쪽 gap(라디안)만큼 비워 둔 구의 한 조각 (옆머리·뒷머리)
     shell: (t0, tl, gap) => {
       const k = `h${t0}|${tl}|${gap}`;
-      if (!geo.has(k)) {
-        const g = new T.SphereGeometry(1, 20, 8, Math.PI / 2 + gap, Math.PI * 2 - gap * 2, t0, tl);
-        const uv = g.attributes.uv;
-        for (let i = 0; i < uv.count; i += 1) uv.setY(i, 0.03);
-        geo.set(k, g);
-      }
+      if (!geo.has(k)) geo.set(k, absV(new T.SphereGeometry(1, 20, 8, Math.PI / 2 + gap, Math.PI * 2 - gap * 2, t0, tl), t0, tl, Math.PI / 2 + gap, Math.PI * 2 - gap * 2));
       return geo.get(k);
     },
     tor: (r, t, rs = 6, ts = 20) => { const k = `t${r}|${t}|${rs}|${ts}`; if (!geo.has(k)) geo.set(k, new T.TorusGeometry(r, t, rs, ts)); return geo.get(k); },
   };
   const unit = G.sph(1, 14, 10);
-  G.cap0 = new T.SphereGeometry(1, 24, 9, 0, Math.PI * 2, 0, 1.45);
+  G.cap0 = absV(new T.SphereGeometry(1, 24, 9, 0, Math.PI * 2, 0, 1.45), 0, 1.45);
   G.cone = new T.ConeGeometry(1, 2, 8, 1);
   // 위에서 t(라디안)까지만 덮는 둥근 모자 조각
-  G.capTo = (t) => { const k = `a${t}`; if (!geo.has(k)) geo.set(k, new T.SphereGeometry(1, 24, 9, 0, Math.PI * 2, 0, t)); return geo.get(k); };
+  G.capTo = (t) => { const k = `a${t}`; if (!geo.has(k)) geo.set(k, absV(new T.SphereGeometry(1, 24, 9, 0, Math.PI * 2, 0, t), 0, t)); return geo.get(k); };
 
   // 머리뼈 모양: 아래로 갈수록 갸름하게 (턱선)
   const shapeHead = (g) => {
@@ -337,8 +404,8 @@ export function characterKit(T, tb) {
       const tex = canvasTex(FACE_W, FACE_H, (g, w, h) => drawFace(g, w, h, {
         iris, irisLight: tint(iris, '#ffffff', 0.4), irisDark: tint(iris, '#000000', 0.35), brow, lip, mood,
       }));
-      faceCache.set(key, track(new T.MeshLambertMaterial({
-        map: tex, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3,
+      faceCache.set(key, track(new T.MeshStandardMaterial({
+        map: tex, roughness: 0.6, metalness: 0, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3,
       })));
     }
     return faceCache.get(key);
@@ -347,7 +414,7 @@ export function characterKit(T, tb) {
   const hairMats = new Map();
   const hairMat = (color) => {
     if (!hairMats.has(color)) {
-      hairMats.set(color, track(new T.MeshPhongMaterial({ color, map: hairTex, vertexColors: true, shininess: 42, specular: 0x4d4d4d })));
+      hairMats.set(color, track(addRim(T, new T.MeshStandardMaterial({ color, map: hairTex, vertexColors: true, roughness: 0.4, metalness: 0 }), 0xfff3df, 0.14)));
     }
     return hairMats.get(color);
   };
@@ -376,7 +443,8 @@ export function characterKit(T, tb) {
   const DIM = '#c2c2c2'; // 짧게 민 옆머리는 조금 어둡게
   // 모자 조각: t=덮는 높이각, k=크기, dz=뒤로 물린 정도 (짧게 민 머리는 이마 쪽까지 바짝 붙인다)
   const capPart = (t, k, c, dz = -0.03) => ({ g: G.capTo(t), p: [0, 0.017, dz], s: BASE_S.map((v) => v * k), c });
-  const sidePart = (t0, tl, gap, k, c, dz = -0.03) => ({ g: G.shell(t0, tl, gap), p: [0, 0.017, dz], s: BASE_S.map((v) => v * k), c });
+  // 옆머리 조각은 모자 조각보다 아주 살짝 작게: 겹치는 띠에서 두 면이 깜빡이며 다투지 않는다
+  const sidePart = (t0, tl, gap, k, c, dz = -0.03) => ({ g: G.shell(t0, tl, gap), p: [0, 0.017, dz], s: BASE_S.map((v) => v * k * 0.996), c });
   const sideburns = (top, bot, R = 0.332) => [-1, 1].map((sx) => lock(sx * 1.32, top, bot, 0.035, 0.035, R));
   // 짧게 친 머리 한 벌: 이마 가운데는 높고 옆으로 갈수록 점점 내려와서 머리선이 자연스럽다 (귀는 보인다)
   const trimmed = (k, c, dz) => [
@@ -493,7 +561,8 @@ export function characterKit(T, tb) {
     if (maleHair[style]) return { hair: maleHair[style](), extra: [] };
     const it = [
       { g: G.cap0, p: [0, 0.017, -0.03], s: [0.333, 0.322, 0.321] },
-      { g: G.shell(1.45, 0.8, 1.25), p: [0, 0.017, -0.03], s: [0.333, 0.322, 0.321] },
+      // 뒷머리는 정수리 조각 밑으로 살짝 겹쳐 들어가 이음매 틈이 보이지 않는다
+      { g: G.shell(1.36, 0.89, 1.25), p: [0, 0.017, -0.03], s: [0.3315, 0.3205, 0.3195] },
     ];
     const extra = []; // 머리끈 (머리 색과 따로 칠한다)
     // 앞머리
@@ -541,21 +610,40 @@ export function characterKit(T, tb) {
     return { hair: it, extra };
   }
 
+  // 이름표: 둥근 알약 모양 + 아래로 살짝 그림자. 화면이 촘촘한 태블릿에서도 글자가 또렷하게 두 배 크기로 그린다.
+  //  카메라에 가까워지면 schoolroom.js 가 크기를 줄이고 흐리게 해서 화면을 가리지 않는다 (fitTag)
   function tag(text, bg = '#ffffff') {
-    const tex = canvasTex(360, 96, (g, w, h) => {
+    const tex = canvasTex(720, 200, (g, w, h) => {
+      const pill = (x, y, pw, ph) => {
+        const r = ph / 2;
+        g.beginPath();
+        g.moveTo(x + r, y);
+        g.arcTo(x + pw, y, x + pw, y + ph, r);
+        g.arcTo(x + pw, y + ph, x, y + ph, r);
+        g.arcTo(x, y + ph, x, y, r);
+        g.arcTo(x, y, x + pw, y, r);
+        g.closePath();
+      };
+      g.fillStyle = 'rgba(43,45,66,.28)';
+      pill(14, 26, w - 28, h - 40);
+      g.fill();
       g.fillStyle = bg;
-      const r = 44;
-      g.beginPath(); g.moveTo(r, 6); g.lineTo(w - r, 6); g.quadraticCurveTo(w - 6, 6, w - 6, h / 2); g.quadraticCurveTo(w - 6, h - 6, w - r, h - 6);
-      g.lineTo(r, h - 6); g.quadraticCurveTo(6, h - 6, 6, h / 2); g.quadraticCurveTo(6, 6, r, 6); g.fill();
-      g.lineWidth = 5; g.strokeStyle = '#2b2d42'; g.stroke();
-      g.fillStyle = '#2b2d42'; g.textAlign = 'center'; g.textBaseline = 'middle';
-      let size = 44;
+      pill(12, 12, w - 24, h - 40);
+      g.fill();
+      g.lineWidth = 9;
+      g.strokeStyle = '#2b2d42';
+      g.stroke();
+      g.fillStyle = '#2b2d42';
+      g.textAlign = 'center';
+      g.textBaseline = 'middle';
+      let size = 84;
       g.font = `700 ${size}px Jua, "Malgun Gothic", sans-serif`;
-      while (g.measureText(text).width > w - 50 && size > 22) { size -= 2; g.font = `700 ${size}px Jua, "Malgun Gothic", sans-serif`; }
-      g.fillText(text, w / 2, h / 2 + 3);
+      while (g.measureText(text).width > w - 100 && size > 40) { size -= 4; g.font = `700 ${size}px Jua, "Malgun Gothic", sans-serif`; }
+      g.fillText(text, w / 2, (h - 28) / 2 + 6);
     });
-    const sp = new T.Sprite(new T.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
-    sp.scale.set(1.3, 0.35, 1);
+    const sp = new T.Sprite(new T.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, toneMapped: false }));
+    sp.scale.set(1.18, 0.33, 1);
+    sp.userData.base = [1.18, 0.33];
     return sp;
   }
 
@@ -694,14 +782,15 @@ export function characterKit(T, tb) {
     const hair = new T.Mesh(bake(T, hairParts.hair), hairMat(look.hair));
     head.add(hair);
 
-    const shadow = new T.Mesh(new T.PlaneGeometry(1.1, 1.1), new T.MeshBasicMaterial({ map: blobTex, transparent: true, depthWrite: false }));
+    const shadow = new T.Mesh(new T.PlaneGeometry(0.95, 0.95), new T.MeshBasicMaterial({ map: blobTex, transparent: true, depthWrite: false }));
     shadow.rotation.x = -Math.PI / 2;
     shadow.position.y = 0.012;
     root.add(shadow);
+    let nameTag = null;
     if (name) {
-      const t = tag(name, tagBg);
-      t.position.y = 2.16;
-      root.add(t);
+      nameTag = tag(name, tagBg);
+      nameTag.position.y = 2.16;
+      root.add(nameTag);
     }
     body.position.y = HIP - 0.72;
     head.scale.setScalar(HEAD_K);
@@ -709,7 +798,7 @@ export function characterKit(T, tb) {
     root.userData = {
       body, head, legL: legL.hip, legR: legR.hip, kneeL: legL.knee, kneeR: legR.knee,
       armL: armL.shoulder, armR: armR.shoulder, elbowL: armL.elbow, elbowR: armR.elbow,
-      face, look, bag, mood: 'open', nextBlink: performance.now() / 1000 + rand(1, 5), blinkUntil: 0,
+      face, look, bag, tag: nameTag, mood: 'open', nextBlink: performance.now() / 1000 + rand(1, 5), blinkUntil: 0,
       sit: false, baseY: HIP - 0.72,
     };
     return root;
@@ -795,8 +884,12 @@ export async function mountCharacterPreview(container, look, role = 'friend', na
   const tb = toolbox(T);
   const kit = characterKit(T, tb);
   const scene = new T.Scene();
-  scene.add(new T.HemisphereLight(0xffffff, 0xd9cdb8, 2.5));
-  const sun = new T.DirectionalLight(0xfff4dc, 1.9);
+  renderer.toneMapping = T.NeutralToneMapping;
+  renderer.toneMappingExposure = 1.05;
+  let envRT = null;
+  try { envRT = roomEnvironment(T, renderer); scene.environment = envRT.texture; } catch (_) { /* 빛 환경 없이도 보인다 */ }
+  scene.add(new T.HemisphereLight(0xffffff, 0xd9cdb8, envRT ? 0.5 : 2.5));
+  const sun = new T.DirectionalLight(0xfff1d8, 1.7);
   sun.position.set(-3, 5, 4);
   scene.add(sun);
   const camera = new T.PerspectiveCamera(32, 0.85, 0.1, 50);
@@ -855,6 +948,7 @@ export async function mountCharacterPreview(container, look, role = 'friend', na
       window.removeEventListener('resize', resize);
       scene.traverse((o) => o.geometry && o.geometry.dispose());
       tb.dispose();
+      if (envRT) envRT.dispose();
       renderer.dispose();
       renderer.forceContextLoss?.();
       container.innerHTML = '';
